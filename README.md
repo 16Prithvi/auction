@@ -2,7 +2,7 @@
 
 Small auction platform for demonstrating backend engineering: REST, PostgreSQL transactions, concurrent bidding, Socket.IO, Redis, Docker, and deployment.
 
-The UI is at **Phase 1**. Screens use mock data in the browser. The API is not connected.
+The UI is at **Phase 1** and still uses mock data. The API and PostgreSQL schema are at **Phase 2**. The frontend is not connected to the API yet.
 
 ## Project overview
 
@@ -41,15 +41,17 @@ Prisma is pinned to 6. Prisma 7 removes `url` from the schema and requires a dri
 
 ## How bidding works
 
-Not implemented. Planned rule: English ascending auction. A bid must beat the current price by at least the minimum increment. The server accepts the bid, stores it, and updates the current price.
+English ascending auction. The auction starts at `startingPrice`. A bid is accepted only when the auction is `ACTIVE`, the caller is not the auctioneer, and the amount is at least the current price plus `minimumBidIncrement`. Prices are PostgreSQL decimals. The accepted bid becomes `currentPrice`. Ending an auction sets the winner to the highest bid, with the earlier bid winning a tie.
+
+Anti-sniping is not implemented yet.
 
 ## Concurrency problem
 
-Not implemented. Two bids arriving together can both read the same price and both try to win. The design will not use sleeps or client-side checks.
+Two bids can read the same price and both try to become the current price.
 
 ## Concurrency solution
 
-Not implemented. Phase 3 will use a PostgreSQL transaction so the auction row is read and updated atomically, then the accepted bid is broadcast.
+`POST /auctions/:id/bids` updates the price only when it still matches the price that was validated, inside a transaction. If another bid wins that race, a still-valid amount is tried again. Anti-sniping, a fuller write-up, and a load test are Phase 3.
 
 ## Why WebSockets are used
 
@@ -100,8 +102,21 @@ Backend, without Docker (Postgres and Redis still come from Compose):
 docker compose up postgres redis
 cd backend
 npm install
+npx prisma migrate deploy
 npm run dev
 ```
+
+The API reads `DATABASE_URL` and `JWT_SECRET`. Copy `.env.example` to `.env` before starting it.
+
+Useful routes:
+
+- `POST /auth/register` and `POST /auth/login` return a bearer token
+- `GET /me`, `GET /me/auctions`, `GET /me/bids`
+- `GET /auctions`, `POST /auctions`, `GET /auctions/:id`
+- `POST /auctions/:id/start|pause|resume|end|cancel`
+- `POST /auctions/:id/bids` with `{ "amount": "110.50" }`
+
+Money is sent as decimal strings. Errors look like `{ "success": false, "error": { "code": "BID_TOO_LOW", "message": "..." } }`.
 
 Checks:
 
@@ -116,7 +131,7 @@ cd frontend && npm run lint && npm run build
 | ----------------------- | ------------------------------- |
 | 0 Foundation            | Done in this tree               |
 | 1 Light frontend        | Done. Mock data only            |
-| 2 Backend and database  | Not started                     |
+| 2 Backend and database  | Done. Frontend still uses mocks |
 | 3 Concurrent bidding    | Not started                     |
 | 4 Connect frontend      | Not started                     |
 | 5 WebSockets            | Not started                     |

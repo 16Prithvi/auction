@@ -1,18 +1,7 @@
-import cors from "cors";
-import express from "express";
+import { createApp } from "./app.js";
 import { env } from "./config/env.js";
-import { healthRouter } from "./routes/health.js";
 
-const app = express();
-
-app.disable("x-powered-by");
-app.use(express.json());
-app.use(
-  cors({
-    origin: env.corsOrigin,
-  }),
-);
-app.use(healthRouter);
+const app = createApp();
 
 app.listen(env.port, () => {
   console.log(

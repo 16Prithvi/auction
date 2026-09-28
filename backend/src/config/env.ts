@@ -21,10 +21,19 @@ for (const envPath of [
 export type AppEnv = {
   nodeEnv: string;
   port: number;
-  databaseUrl: string | undefined;
+  databaseUrl: string;
   redisUrl: string | undefined;
   corsOrigin: string;
+  jwtSecret: string;
 };
+
+function required(source: NodeJS.ProcessEnv, name: string): string {
+  const value = source[name];
+  if (!value) {
+    throw new Error(`Missing environment variable: ${name}`);
+  }
+  return value;
+}
 
 function readPort(raw: string | undefined): number {
   const port = Number(raw ?? "4000");
@@ -38,9 +47,10 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   return {
     nodeEnv: source.NODE_ENV ?? "development",
     port: readPort(source.PORT),
-    databaseUrl: source.DATABASE_URL,
+    databaseUrl: required(source, "DATABASE_URL"),
     redisUrl: source.REDIS_URL,
     corsOrigin: source.CORS_ORIGIN ?? "http://localhost:3000",
+    jwtSecret: required(source, "JWT_SECRET"),
   };
 }
 
