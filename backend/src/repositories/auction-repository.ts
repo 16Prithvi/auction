@@ -35,6 +35,13 @@ export async function lockAuction(db: Db, id: string) {
   return findAuction(db, id);
 }
 
+export function listClosableAuctions() {
+  return prisma.auction.findMany({
+    where: { status: { in: ["ACTIVE", "PAUSED"] } },
+    select: { id: true, endsAt: true },
+  });
+}
+
 export function findExpiredAuctionIds(now: Date) {
   return prisma.auction.findMany({
     where: {

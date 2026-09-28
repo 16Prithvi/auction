@@ -1,14 +1,43 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState, type FormEvent } from "react";
-import { ApiError, getAuction, placeBid } from "@/lib/api";
+import {
+  useEffect,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+} from "react";
+import { io, type Socket } from "socket.io-client";
+import {
+  ApiError,
+  AUTH_EVENT,
+  getAuction,
+  getToken,
+  placeBid,
+  socketBaseUrl,
+} from "@/lib/api";
 import { formatInr } from "@/lib/money";
-import type { Auction, Bid } from "@/lib/types";
+import type { AcceptedBid, Auction, AuctionSnapshot, Bid } from "@/lib/types";
 import { Countdown } from "./countdown";
 import { StatusBadge } from "./status-badge";
 
+type LiveLink = "connected" | "reconnecting" | "idle";
+
+function subscribe(onStoreChange: () => void) {
+  window.addEventListener(AUTH_EVENT, onStoreChange);
+  window.addEventListener("storage", onStoreChange);
+  return () => {
+    window.removeEventListener(AUTH_EVENT, onStoreChange);
+    window.removeEventListener("storage", onStoreChange);
+  };
+}
+
+function applySnapshot(current: Auction, next: AuctionSnapshot): Auction {
+  return { ...current, ...next };
+}
+
 export function LiveRoom({ id }: { id: string }) {
+  const token = useSyncExternalStore(subscribe, getToken, () => null);
   const [auction, setAuction] = useState<Auction | null>(null);
   const [bids, setBids] = useState<Bid[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -16,6 +45,7 @@ export function LiveRoom({ id }: { id: string }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [noticeError, setNoticeError] = useState(false);
   const [pending, setPending] = useState(false);
+  const [link, setLink] = useState<LiveLink>("idle");
 
   useEffect(() => {
     let cancelled = false;
@@ -24,6 +54,7 @@ export function LiveRoom({ id }: { id: string }) {
         if (!cancelled) {
           setAuction(data);
           setBids(data.bids ?? []);
+          setError(null);
         }
       })
       .catch((caught) => {
@@ -37,6 +68,107 @@ export function LiveRoom({ id }: { id: string }) {
       cancelled = true;
     };
   }, [id]);
+
+  useEffect(() => {
+    if (!token) {
+      return;
+    }
+
+    let cancelled = false;
+    const socket: Socket = io(socketBaseUrl(), {
+      auth: { token },
+      reconnection: true,
+    });
+
+    function refresh() {
+      getAuction(id)
+        .then((data) => {
+          if (!cancelled) {
+            setAuction(data);
+            setBids(data.bids ?? []);
+            setError(null);
+          }
+        })
+        .catch(() => {
+          // The socket still applies later events. The first load reports errors.
+        });
+    }
+
+    socket.on("connect", () => {
+      if (cancelled) {
+        return;
+      }
+      setLink("connected");
+      socket.emit("auction:join", id);
+      refresh();
+    });
+    socket.on("disconnect", () => {
+      if (!cancelled) {
+        setLink(socket.active ? "reconnecting" : "idle");
+      }
+    });
+    socket.io.on("reconnect_attempt", () => {
+      if (!cancelled) {
+        setLink("reconnecting");
+      }
+    });
+    socket.on("connect_error", () => {
+      if (!cancelled) {
+        setLink(socket.active ? "reconnecting" : "idle");
+      }
+    });
+    socket.on(
+      "bid:accepted",
+      (payload: AcceptedBid & { auctionId: string }) => {
+        if (cancelled || payload.auctionId !== id) {
+          return;
+        }
+        setAuction((current) =>
+          current
+            ? {
+                ...current,
+                currentPrice: payload.currentPrice,
+                minimumNextBid: payload.minimumNextBid,
+                endsAt: payload.endsAt,
+              }
+            : current,
+        );
+        setBids((current) =>
+          current.some((bid) => bid.id === payload.bid.id)
+            ? current
+            : [payload.bid, ...current],
+        );
+        if (payload.extended) {
+          setNoticeError(false);
+          setNotice("The server extended the auction.");
+        }
+      },
+    );
+    socket.on("auction:updated", (snapshot: AuctionSnapshot) => {
+      if (cancelled || snapshot.id !== id) {
+        return;
+      }
+      setAuction((current) =>
+        current ? applySnapshot(current, snapshot) : { ...snapshot },
+      );
+    });
+    socket.on("auction:completed", (snapshot: AuctionSnapshot) => {
+      if (cancelled || snapshot.id !== id) {
+        return;
+      }
+      setAuction((current) =>
+        current ? applySnapshot(current, snapshot) : { ...snapshot },
+      );
+      setNoticeError(false);
+      setNotice("This auction has ended.");
+    });
+
+    return () => {
+      cancelled = true;
+      socket.removeAllListeners();
+      socket.disconnect();
+    };
+  }, [id, token]);
 
   if (error) {
     return (
@@ -75,7 +207,11 @@ export function LiveRoom({ id }: { id: string }) {
             }
           : current,
       );
-      setBids((current) => [accepted.bid, ...current]);
+      setBids((current) =>
+        current.some((bid) => bid.id === accepted.bid.id)
+          ? current
+          : [accepted.bid, ...current],
+      );
       setAmount("");
       setNotice(
         accepted.extended
@@ -91,6 +227,14 @@ export function LiveRoom({ id }: { id: string }) {
       setPending(false);
     }
   }
+
+  const connected = Boolean(token) && link === "connected";
+  const reconnecting = Boolean(token) && link === "reconnecting";
+  const linkLabel = connected
+    ? "Connected"
+    : reconnecting
+      ? "Reconnecting"
+      : "Not connected";
 
   return (
     <main className="mx-auto w-full max-w-3xl px-4 py-8">
@@ -147,14 +291,22 @@ export function LiveRoom({ id }: { id: string }) {
         />
         <button
           type="submit"
-          disabled={pending}
+          disabled={pending || auction.status !== "ACTIVE"}
           className="rounded-md bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-60"
         >
           Place bid
         </button>
         <p className="text-sm text-zinc-500">
-          <span className="mr-1 inline-block h-2 w-2 rounded-full bg-zinc-400" />
-          Not connected
+          <span
+            className={`mr-1 inline-block h-2 w-2 rounded-full ${
+              connected
+                ? "bg-green-600"
+                : reconnecting
+                  ? "bg-amber-500"
+                  : "bg-zinc-400"
+            }`}
+          />
+          {linkLabel}
         </p>
       </form>
       {notice ? (

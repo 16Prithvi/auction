@@ -15,6 +15,14 @@ import {
   updateAuction,
   type Db,
 } from "../repositories/auction-repository.js";
+import {
+  publishAuctionCompleted,
+  publishAuctionUpdated,
+} from "../realtime/publish.js";
+import {
+  clearAuctionClose,
+  scheduleAuctionClose,
+} from "../realtime/schedule.js";
 import { decimal } from "../utils/money.js";
 import type { createAuctionSchema } from "../validation/auction.js";
 
@@ -84,12 +92,28 @@ export async function completeInTransaction(
   return completed;
 }
 
+function rememberClose(auction: {
+  id: string;
+  status: AuctionStatus;
+  endsAt: Date;
+}) {
+  if (auction.status === "ACTIVE" || auction.status === "PAUSED") {
+    scheduleAuctionClose(auction.id, auction.endsAt);
+    return;
+  }
+  clearAuctionClose(auction.id);
+}
+
 export async function settleExpiredAuctions() {
   const due = await findExpiredAuctionIds(new Date());
   for (const auction of due) {
-    await prisma.$transaction((tx) =>
+    const completed = await prisma.$transaction((tx) =>
       completeInTransaction(tx, auction.id, "expired"),
     );
+    if (completed.status === "COMPLETED") {
+      clearAuctionClose(completed.id);
+      publishAuctionCompleted(completed);
+    }
   }
 }
 
@@ -187,10 +211,13 @@ export async function start(actor: Actor, id: string) {
       409,
     );
   }
-  return updateAuction(id, {
+  const started = await updateAuction(id, {
     status: "ACTIVE",
     startedAt: auction.startedAt ?? new Date(),
   });
+  rememberClose(started);
+  publishAuctionUpdated(started);
+  return started;
 }
 
 export async function pause(actor: Actor, id: string) {
@@ -200,7 +227,10 @@ export async function pause(actor: Actor, id: string) {
   }
   assertOwner(auction, actor);
   assertTransition(auction.status, ["ACTIVE"]);
-  return updateAuction(id, { status: "PAUSED" });
+  const paused = await updateAuction(id, { status: "PAUSED" });
+  rememberClose(paused);
+  publishAuctionUpdated(paused);
+  return paused;
 }
 
 export async function resume(actor: Actor, id: string) {
@@ -215,10 +245,15 @@ export async function resume(actor: Actor, id: string) {
       completeInTransaction(tx, id, "expired"),
     );
     if (completed.status === "COMPLETED") {
+      clearAuctionClose(completed.id);
+      publishAuctionCompleted(completed);
       throw new AppError("AUCTION_EXPIRED", "This auction has ended.", 409);
     }
   }
-  return updateAuction(id, { status: "ACTIVE" });
+  const resumed = await updateAuction(id, { status: "ACTIVE" });
+  rememberClose(resumed);
+  publishAuctionUpdated(resumed);
+  return resumed;
 }
 
 export async function end(actor: Actor, id: string) {
@@ -227,11 +262,18 @@ export async function end(actor: Actor, id: string) {
     throw new AppError("AUCTION_NOT_FOUND", "Auction not found.", 404);
   }
   assertOwner(auction, actor);
-  return prisma.$transaction((tx) => completeInTransaction(tx, id, "manual"));
+  const completed = await prisma.$transaction((tx) =>
+    completeInTransaction(tx, id, "manual"),
+  );
+  if (completed.status === "COMPLETED") {
+    clearAuctionClose(completed.id);
+    publishAuctionCompleted(completed);
+  }
+  return completed;
 }
 
 export async function cancel(actor: Actor, id: string) {
-  return prisma.$transaction(async (tx) => {
+  const cancelled = await prisma.$transaction(async (tx) => {
     const auction = await lockAuction(tx, id);
     if (!auction) {
       throw new AppError("AUCTION_NOT_FOUND", "Auction not found.", 404);
@@ -255,6 +297,9 @@ export async function cancel(actor: Actor, id: string) {
       },
     });
   });
+  clearAuctionClose(cancelled.id);
+  publishAuctionUpdated(cancelled);
+  return cancelled;
 }
 
 export async function expireIfNeeded(id: string) {
@@ -269,6 +314,10 @@ export async function expireIfNeeded(id: string) {
     const completed = await prisma.$transaction((tx) =>
       completeInTransaction(tx, id, "expired"),
     );
+    if (completed.status === "COMPLETED") {
+      clearAuctionClose(completed.id);
+      publishAuctionCompleted(completed);
+    }
     return {
       expired: completed.status === "COMPLETED",
       auction: completed,

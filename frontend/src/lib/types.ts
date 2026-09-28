@@ -60,3 +60,5 @@ export type AcceptedBid = {
   endsAt: string;
   extended: boolean;
 };
+
+export type AuctionSnapshot = Omit<Auction, "bids">;

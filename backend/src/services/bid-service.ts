@@ -1,12 +1,23 @@
 import { env } from "../config/env.js";
 import { AppError } from "../lib/errors.js";
 import { prisma } from "../lib/prisma.js";
-import { lockAuction } from "../repositories/auction-repository.js";
+import {
+  findAuction,
+  lockAuction,
+} from "../repositories/auction-repository.js";
 import {
   createBid,
   listBids,
   listBidsByBidder,
 } from "../repositories/bid-repository.js";
+import {
+  publishBidAccepted,
+  publishAuctionCompleted,
+} from "../realtime/publish.js";
+import {
+  clearAuctionClose,
+  scheduleAuctionClose,
+} from "../realtime/schedule.js";
 import { decimal } from "../utils/money.js";
 import { completeInTransaction, expireIfNeeded } from "./auction-service.js";
 
@@ -94,7 +105,22 @@ export async function placeBid(
   });
 
   if (result.expired) {
+    const completed = await findAuction(prisma, auctionId);
+    if (completed?.status === "COMPLETED") {
+      clearAuctionClose(auctionId);
+      publishAuctionCompleted(completed);
+    }
     throw new AppError("AUCTION_EXPIRED", "This auction has ended.", 409);
   }
+
+  scheduleAuctionClose(auctionId, result.endsAt);
+  publishBidAccepted({
+    auctionId,
+    bid: result.bid,
+    currentPrice: result.currentPrice,
+    minimumBidIncrement: result.minimumBidIncrement,
+    endsAt: result.endsAt,
+    extended: result.extended,
+  });
   return result;
 }
