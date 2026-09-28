@@ -1,3 +1,9 @@
+import {
+  AUCTION_CACHE_TTL_SECONDS,
+  auctionBidsKey,
+  cacheAside,
+  invalidateAuctionCache,
+} from "../cache/auction-cache.js";
 import { env } from "../config/env.js";
 import { AppError } from "../lib/errors.js";
 import { prisma } from "../lib/prisma.js";
@@ -19,11 +25,20 @@ import {
   scheduleAuctionClose,
 } from "../realtime/schedule.js";
 import { decimal } from "../utils/money.js";
+import { serializeBid } from "../utils/serialize.js";
 import { completeInTransaction, expireIfNeeded } from "./auction-service.js";
 
 export async function bidsForAuction(auctionId: string) {
-  const settled = await expireIfNeeded(auctionId);
-  return listBids(settled.auction.id);
+  const { value, hit } = await cacheAside(
+    auctionBidsKey(auctionId),
+    AUCTION_CACHE_TTL_SECONDS,
+    async () => {
+      const settled = await expireIfNeeded(auctionId);
+      const rows = await listBids(settled.auction.id);
+      return rows.map((bid) => serializeBid(bid));
+    },
+  );
+  return { bids: value, cache: hit ? ("HIT" as const) : ("MISS" as const) };
 }
 
 export function bidsForUser(userId: string) {
@@ -109,6 +124,7 @@ export async function placeBid(
     if (completed?.status === "COMPLETED") {
       clearAuctionClose(auctionId);
       publishAuctionCompleted(completed);
+      await invalidateAuctionCache(auctionId);
     }
     throw new AppError("AUCTION_EXPIRED", "This auction has ended.", 409);
   }
@@ -122,5 +138,6 @@ export async function placeBid(
     endsAt: result.endsAt,
     extended: result.extended,
   });
+  await invalidateAuctionCache(auctionId);
   return result;
 }

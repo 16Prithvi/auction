@@ -1,5 +1,13 @@
 import type { AuctionStatus, Prisma } from "@prisma/client";
 import type { z } from "zod";
+import {
+  AUCTION_CACHE_TTL_SECONDS,
+  LIST_CACHE_TTL_SECONDS,
+  auctionDetailKey,
+  auctionListKey,
+  cacheAside,
+  invalidateAuctionCache,
+} from "../cache/auction-cache.js";
 import { AppError } from "../lib/errors.js";
 import { prisma } from "../lib/prisma.js";
 import {
@@ -15,6 +23,7 @@ import {
   updateAuction,
   type Db,
 } from "../repositories/auction-repository.js";
+import { listBids } from "../repositories/bid-repository.js";
 import {
   publishAuctionCompleted,
   publishAuctionUpdated,
@@ -24,6 +33,7 @@ import {
   scheduleAuctionClose,
 } from "../realtime/schedule.js";
 import { decimal } from "../utils/money.js";
+import { serializeAuction } from "../utils/serialize.js";
 import type { createAuctionSchema } from "../validation/auction.js";
 
 type AuctionInput = z.infer<typeof createAuctionSchema>;
@@ -113,6 +123,7 @@ export async function settleExpiredAuctions() {
     if (completed.status === "COMPLETED") {
       clearAuctionClose(completed.id);
       publishAuctionCompleted(completed);
+      await invalidateAuctionCache(completed.id);
     }
   }
 }
@@ -154,15 +165,25 @@ function priceInput(
 }
 
 export async function create(actor: Actor, input: AuctionInput) {
-  return createAuction({
+  const auction = await createAuction({
     ...priceInput(input),
     createdById: actor.id,
   });
+  await invalidateAuctionCache(auction.id);
+  return auction;
 }
 
 export async function list(status?: AuctionStatus) {
-  await settleExpiredAuctions();
-  return listAuctions(status);
+  const { value, hit } = await cacheAside(
+    auctionListKey(status),
+    LIST_CACHE_TTL_SECONDS,
+    async () => {
+      await settleExpiredAuctions();
+      const rows = await listAuctions(status);
+      return rows.map((auction) => serializeAuction(auction));
+    },
+  );
+  return { auctions: value, cache: hit ? ("HIT" as const) : ("MISS" as const) };
 }
 
 export async function listMine(actor: Actor) {
@@ -171,12 +192,20 @@ export async function listMine(actor: Actor) {
 }
 
 export async function getById(id: string) {
-  await settleExpiredAuctions();
-  const auction = await findAuction(prisma, id);
-  if (!auction) {
-    throw new AppError("AUCTION_NOT_FOUND", "Auction not found.", 404);
-  }
-  return auction;
+  const { value, hit } = await cacheAside(
+    auctionDetailKey(id),
+    AUCTION_CACHE_TTL_SECONDS,
+    async () => {
+      await settleExpiredAuctions();
+      const auction = await findAuction(prisma, id);
+      if (!auction) {
+        throw new AppError("AUCTION_NOT_FOUND", "Auction not found.", 404);
+      }
+      const bids = await listBids(id);
+      return serializeAuction(auction, bids);
+    },
+  );
+  return { auction: value, cache: hit ? ("HIT" as const) : ("MISS" as const) };
 }
 
 export async function update(actor: Actor, id: string, input: AuctionInput) {
@@ -194,7 +223,9 @@ export async function update(actor: Actor, id: string, input: AuctionInput) {
       409,
     );
   }
-  return updateAuction(id, priceInput(input));
+  const updated = await updateAuction(id, priceInput(input));
+  await invalidateAuctionCache(updated.id);
+  return updated;
 }
 
 export async function start(actor: Actor, id: string) {
@@ -217,6 +248,7 @@ export async function start(actor: Actor, id: string) {
   });
   rememberClose(started);
   publishAuctionUpdated(started);
+  await invalidateAuctionCache(started.id);
   return started;
 }
 
@@ -230,6 +262,7 @@ export async function pause(actor: Actor, id: string) {
   const paused = await updateAuction(id, { status: "PAUSED" });
   rememberClose(paused);
   publishAuctionUpdated(paused);
+  await invalidateAuctionCache(paused.id);
   return paused;
 }
 
@@ -247,12 +280,14 @@ export async function resume(actor: Actor, id: string) {
     if (completed.status === "COMPLETED") {
       clearAuctionClose(completed.id);
       publishAuctionCompleted(completed);
+      await invalidateAuctionCache(completed.id);
       throw new AppError("AUCTION_EXPIRED", "This auction has ended.", 409);
     }
   }
   const resumed = await updateAuction(id, { status: "ACTIVE" });
   rememberClose(resumed);
   publishAuctionUpdated(resumed);
+  await invalidateAuctionCache(resumed.id);
   return resumed;
 }
 
@@ -268,6 +303,7 @@ export async function end(actor: Actor, id: string) {
   if (completed.status === "COMPLETED") {
     clearAuctionClose(completed.id);
     publishAuctionCompleted(completed);
+    await invalidateAuctionCache(completed.id);
   }
   return completed;
 }
@@ -299,6 +335,7 @@ export async function cancel(actor: Actor, id: string) {
   });
   clearAuctionClose(cancelled.id);
   publishAuctionUpdated(cancelled);
+  await invalidateAuctionCache(cancelled.id);
   return cancelled;
 }
 
@@ -317,6 +354,7 @@ export async function expireIfNeeded(id: string) {
     if (completed.status === "COMPLETED") {
       clearAuctionClose(completed.id);
       publishAuctionCompleted(completed);
+      await invalidateAuctionCache(completed.id);
     }
     return {
       expired: completed.status === "COMPLETED",

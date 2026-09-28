@@ -6,7 +6,6 @@ import * as auctionService from "../services/auction-service.js";
 import * as bidService from "../services/bid-service.js";
 import { money } from "../utils/money.js";
 import { serializeAuction, serializeBid } from "../utils/serialize.js";
-import { listBids } from "../repositories/bid-repository.js";
 import type {
   createAuctionSchema,
   placeBidSchema,
@@ -41,12 +40,13 @@ export async function list(req: Request, res: Response) {
   if (!parsed.success) {
     throw new AppError("VALIDATION_ERROR", "Unknown auction status.", 400);
   }
-  const auctions = await auctionService.list(
+  const { auctions, cache } = await auctionService.list(
     parsed.data as AuctionStatus | undefined,
   );
+  res.set("X-Cache", cache);
   res.status(200).json({
     success: true,
-    data: auctions.map((auction) => serializeAuction(auction)),
+    data: auctions,
   });
 }
 
@@ -59,12 +59,11 @@ export async function mine(req: Request, res: Response) {
 }
 
 export async function getOne(req: Request, res: Response) {
-  const id = auctionId(req);
-  const auction = await auctionService.getById(id);
-  const bids = await listBids(id);
+  const { auction, cache } = await auctionService.getById(auctionId(req));
+  res.set("X-Cache", cache);
   res.status(200).json({
     success: true,
-    data: serializeAuction(auction, bids),
+    data: auction,
   });
 }
 
@@ -91,7 +90,7 @@ async function transition(
   action: (
     user: NonNullable<Request["user"]>,
     id: string,
-  ) => Promise<Awaited<ReturnType<typeof auctionService.getById>>>,
+  ) => Promise<Awaited<ReturnType<typeof auctionService.start>>>,
 ) {
   const auction = await action(actor(req), auctionId(req));
   res.status(200).json({ success: true, data: serializeAuction(auction) });
@@ -118,8 +117,9 @@ export function cancel(req: Request, res: Response) {
 }
 
 export async function bids(req: Request, res: Response) {
-  const rows = await bidService.bidsForAuction(auctionId(req));
-  res.status(200).json({ success: true, data: rows.map(serializeBid) });
+  const { bids: rows, cache } = await bidService.bidsForAuction(auctionId(req));
+  res.set("X-Cache", cache);
+  res.status(200).json({ success: true, data: rows });
 }
 
 export async function myBids(req: Request, res: Response) {

@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { clearReadCache } from "./cache/auction-cache.js";
 import { createApp } from "./app.js";
 import { env } from "./config/env.js";
 import { attachRealtime } from "./realtime/server.js";
@@ -17,13 +18,15 @@ httpServer.listen(env.port, () => {
       nodeEnv: env.nodeEnv,
     }),
   );
-  void scheduleOpenAuctions().catch((error: unknown) => {
-    console.log(
-      JSON.stringify({
-        level: "error",
-        msg: "failed to schedule open auctions",
-        error: error instanceof Error ? error.message : "unknown",
-      }),
-    );
+  void clearReadCache().finally(() => {
+    void scheduleOpenAuctions().catch((error: unknown) => {
+      console.log(
+        JSON.stringify({
+          level: "error",
+          msg: "failed to schedule open auctions",
+          error: error instanceof Error ? error.message : "unknown",
+        }),
+      );
+    });
   });
 });
