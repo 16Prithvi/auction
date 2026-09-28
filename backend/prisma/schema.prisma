@@ -1,0 +1,10 @@
+// Data models are added in Phase 2. This file only configures the PostgreSQL connection.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
