@@ -87,7 +87,28 @@ The API also schedules one timer per open auction for `endsAt`. That timer close
 
 ## Deployment
 
-Not deployed. Target: frontend on Vercel, backend and managed PostgreSQL and Redis on Railway. The API reads `process.env.PORT` and exposes `GET /health`.
+The API image is `backend/Dockerfile`. Compose runs PostgreSQL, Redis, and that image. The image applies migrations, then listens on `PORT` (4000 inside Compose). `GET /health` is the health check.
+
+Remote target: frontend on Vercel, backend plus PostgreSQL and Redis on Railway. No live URLs are recorded here yet. This environment has no Vercel or Railway credentials, so those hosts were not created.
+
+Railway, three services from this repo's GitHub connection:
+
+1. PostgreSQL and Redis from the Railway database plugins.
+2. Backend service. Set the root directory to `backend` so the Docker build context matches `backend/Dockerfile`. `backend/railway.toml` selects that Dockerfile and checks `/health`.
+3. Variables on the backend service: `DATABASE_URL` and `REDIS_URL` from the plugins, a long random `JWT_SECRET`, and `CORS_ORIGIN` set to the Vercel origin (`https://…`, no trailing slash). Railway sets `PORT`. Do not use `change-me-local-only` outside this Compose file.
+
+Vercel project for `frontend`, framework Next.js. Set these before the production build, then redeploy, because Next inlines them:
+
+- `NEXT_PUBLIC_API_URL` = the Railway public API origin
+- `NEXT_PUBLIC_SOCKET_URL` = the same origin
+
+The live room and the API must both use that public HTTPS origin. Socket.IO stays on the API port.
+
+If host ports 5432 or 6379 are already taken, Compose can publish different ones:
+
+```bash
+POSTGRES_PORT=5433 REDIS_PORT=6380 BACKEND_PORT=4010 docker compose up --build
+```
 
 ## Performance testing
 
@@ -156,6 +177,6 @@ cd frontend && npm run lint && npm run build
 | 4 Connect frontend      | Done                                        |
 | 5 WebSockets            | Done                                        |
 | 6 Redis                 | Done. Cache-aside and the Socket.IO adapter |
-| 7 Docker and deployment | Compose file only; not deployed             |
+| 7 Docker and deployment | Image runs with Compose Postgres and Redis. Hosts not created |
 | 8 Testing and metrics   | Not started                                 |
 | 9 Final cleanup         | Not started                                 |

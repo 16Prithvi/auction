@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-auction}
       POSTGRES_DB: ${POSTGRES_DB:-auction}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -22,7 +22,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -32,9 +32,9 @@ services:
   backend:
     build: ./backend
     ports:
-      - "${PORT:-4000}:4000"
+      - "${BACKEND_PORT:-4000}:4000"
     environment:
-      NODE_ENV: development
+      NODE_ENV: production
       PORT: 4000
       DATABASE_URL: postgresql://${POSTGRES_USER:-auction}:${POSTGRES_PASSWORD:-auction}@postgres:5432/${POSTGRES_DB:-auction}
       REDIS_URL: redis://redis:6379
