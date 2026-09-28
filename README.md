@@ -236,6 +236,7 @@ Checks:
 ```bash
 cd backend && npm run typecheck && npm run lint && npm run build
 cd frontend && npm run lint && npm run build
+node load/run.mjs
 ```
 
 ## Phase status
@@ -245,7 +246,7 @@ cd frontend && npm run lint && npm run build
 | 0 Foundation            | Done in this tree                           |
 | 1 Light frontend        | Replaced by the API in Phase 4              |
 | 2 Backend and database  | Done                                        |
-| 3 Concurrent bidding    | Done. Load test is Phase 8                  |
+| 3 Concurrent bidding    | Done. Measured in Phase 8                   |
 | 4 Connect frontend      | Done                                        |
 | 5 WebSockets            | Done                                        |
 | 6 Redis                 | Done. Cache-aside and the Socket.IO adapter |
