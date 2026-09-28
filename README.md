@@ -23,7 +23,7 @@ backend (Express, one or more instances)
 PostgreSQL         Redis
 ```
 
-Redis currently caches auction reads. Pub/Sub and the Socket.IO Redis adapter, so two backend instances can fan out the same bid, are not implemented.
+Redis caches auction reads. The Socket.IO Redis adapter uses Redis Pub/Sub so a bid accepted on one backend process reaches clients connected to another.
 
 Prisma is pinned to 6. Prisma 7 removes `url` from the schema and requires a driver adapter. Version 6 keeps the usual schema and client, which is enough for this project.
 
@@ -34,7 +34,7 @@ Prisma is pinned to 6. Prisma 7 removes `url` from the schema and requires a dri
 | Frontend                 | Next.js, TypeScript, Tailwind CSS, Socket.IO client     |
 | Backend                  | Node.js, TypeScript, Express, Socket.IO                 |
 | Database                 | PostgreSQL, Prisma 6                                    |
-| Cache / realtime fan-out | Redis, ioredis. Cache-aside is on. Pub/Sub is not       |
+| Cache / realtime fan-out | Redis, ioredis, Socket.IO Redis adapter                 |
 | Containers               | Docker Compose                                          |
 | Load tests               | k6 (later)                                              |
 | Deploy                   | Vercel (frontend), Railway (backend, PostgreSQL, Redis) |
@@ -75,16 +75,15 @@ Events, all sent after the database commit:
 - `auction:updated` — start, pause, resume, or cancel
 - `auction:completed` — winner and final price when the auction ends
 
-The API also schedules one timer per open auction for `endsAt`. That timer closes the auction and emits `auction:completed`. It is not a one-second poll. Two backend instances do not share rooms yet. The Socket.IO Redis adapter is not implemented.
+The API also schedules one timer per open auction for `endsAt`. That timer closes the auction and emits `auction:completed`. It is not a one-second poll. Each process may run that timer. Only the process that changes the row emits completion, and the Redis adapter delivers it to every process in the room.
 
 ## Why Redis is used
 
 - Cache-aside for auction list, auction detail, and bid history. PostgreSQL remains the source of truth. A miss reads PostgreSQL and stores the JSON. A hit returns that JSON and does not read the auction or bid tables.
 - Keys: `cache:auction:{id}` and `cache:auction:{id}:bids` live for 60 seconds. `cache:auctions:all` and `cache:auctions:status:{status}` live for 30 seconds. The TTL is only a backstop.
 - After a create, update, bid, or status change commits, those keys are deleted. The next read loads PostgreSQL again. Cached routes send `X-Cache: HIT` or `X-Cache: MISS`.
-- If Redis is down, reads use PostgreSQL and writes still commit. A Redis error does not roll back the auction.
-- Pub/Sub so a bid accepted on one backend instance reaches clients connected to another. Not implemented.
-- Socket.IO Redis adapter for that multi-instance fan-out. Not implemented. One process still owns the Socket.IO rooms.
+- If Redis is down, reads use PostgreSQL and writes still commit. A Redis error does not roll back the auction. Socket.IO keeps working for clients connected to that same process, without cross-process fan-out.
+- The Socket.IO Redis adapter publishes room events on Redis Pub/Sub. `io.to("auction:{id}").emit(...)` on one process is delivered to sockets joined to that room on every process that shares `REDIS_URL`. Cache deletes are already shared because every process uses the same Redis keys.
 
 ## Deployment
 
@@ -148,15 +147,15 @@ cd frontend && npm run lint && npm run build
 
 ## Phase status
 
-| Phase                   | Status                                   |
-| ----------------------- | ---------------------------------------- |
-| 0 Foundation            | Done in this tree                        |
-| 1 Light frontend        | Replaced by the API in Phase 4           |
-| 2 Backend and database  | Done                                     |
-| 3 Concurrent bidding    | Done. Load test is Phase 8               |
-| 4 Connect frontend      | Done                                     |
-| 5 WebSockets            | Done. Redis adapter is not started       |
-| 6 Redis                 | Cache-aside done. Pub/Sub is not started |
-| 7 Docker and deployment | Compose file only; not deployed          |
-| 8 Testing and metrics   | Not started                              |
-| 9 Final cleanup         | Not started                              |
+| Phase                   | Status                                      |
+| ----------------------- | ------------------------------------------- |
+| 0 Foundation            | Done in this tree                           |
+| 1 Light frontend        | Replaced by the API in Phase 4              |
+| 2 Backend and database  | Done                                        |
+| 3 Concurrent bidding    | Done. Load test is Phase 8                  |
+| 4 Connect frontend      | Done                                        |
+| 5 WebSockets            | Done                                        |
+| 6 Redis                 | Done. Cache-aside and the Socket.IO adapter |
+| 7 Docker and deployment | Compose file only; not deployed             |
+| 8 Testing and metrics   | Not started                                 |
+| 9 Final cleanup         | Not started                                 |

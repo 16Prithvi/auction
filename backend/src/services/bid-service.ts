@@ -7,26 +7,21 @@ import {
 import { env } from "../config/env.js";
 import { AppError } from "../lib/errors.js";
 import { prisma } from "../lib/prisma.js";
-import {
-  findAuction,
-  lockAuction,
-} from "../repositories/auction-repository.js";
+import { lockAuction } from "../repositories/auction-repository.js";
 import {
   createBid,
   listBids,
   listBidsByBidder,
 } from "../repositories/bid-repository.js";
-import {
-  publishBidAccepted,
-  publishAuctionCompleted,
-} from "../realtime/publish.js";
-import {
-  clearAuctionClose,
-  scheduleAuctionClose,
-} from "../realtime/schedule.js";
+import { publishBidAccepted } from "../realtime/publish.js";
+import { scheduleAuctionClose } from "../realtime/schedule.js";
 import { decimal } from "../utils/money.js";
 import { serializeBid } from "../utils/serialize.js";
-import { completeInTransaction, expireIfNeeded } from "./auction-service.js";
+import {
+  completeInTransaction,
+  expireIfNeeded,
+  announceCompletion,
+} from "./auction-service.js";
 
 export async function bidsForAuction(auctionId: string) {
   const { value, hit } = await cacheAside(
@@ -70,8 +65,8 @@ export async function placeBid(
       auction.endsAt <= now
     ) {
       const completed = await completeInTransaction(tx, auctionId, "expired");
-      if (completed.status === "COMPLETED") {
-        return { expired: true as const };
+      if (completed.auction.status === "COMPLETED") {
+        return { expired: true as const, completion: completed };
       }
     }
 
@@ -120,12 +115,7 @@ export async function placeBid(
   });
 
   if (result.expired) {
-    const completed = await findAuction(prisma, auctionId);
-    if (completed?.status === "COMPLETED") {
-      clearAuctionClose(auctionId);
-      publishAuctionCompleted(completed);
-      await invalidateAuctionCache(auctionId);
-    }
+    await announceCompletion(result.completion);
     throw new AppError("AUCTION_EXPIRED", "This auction has ended.", 409);
   }
 

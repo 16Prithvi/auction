@@ -69,7 +69,7 @@ export async function completeInTransaction(
     throw new AppError("AUCTION_NOT_FOUND", "Auction not found.", 404);
   }
   if (auction.status === "COMPLETED") {
-    return auction;
+    return { auction, changed: false };
   }
   if (auction.status !== "ACTIVE" && auction.status !== "PAUSED") {
     throw new AppError(
@@ -79,7 +79,7 @@ export async function completeInTransaction(
     );
   }
   if (mode === "expired" && auction.endsAt > new Date()) {
-    return auction;
+    return { auction, changed: false };
   }
   const winningBid = await highestBid(db, id);
   const updated = await markCompleted(
@@ -93,13 +93,28 @@ export async function completeInTransaction(
     if (!current) {
       throw new AppError("AUCTION_NOT_FOUND", "Auction not found.", 404);
     }
-    return current;
+    return { auction: current, changed: false };
   }
   const completed = await findAuction(db, id);
   if (!completed) {
     throw new AppError("AUCTION_NOT_FOUND", "Auction not found.", 404);
   }
-  return completed;
+  return { auction: completed, changed: true };
+}
+
+export async function announceCompletion(result: {
+  auction: NonNullable<Awaited<ReturnType<typeof findAuction>>>;
+  changed: boolean;
+}) {
+  if (result.auction.status !== "COMPLETED") {
+    return result.auction;
+  }
+  clearAuctionClose(result.auction.id);
+  if (result.changed) {
+    publishAuctionCompleted(result.auction);
+    await invalidateAuctionCache(result.auction.id);
+  }
+  return result.auction;
 }
 
 function rememberClose(auction: {
@@ -120,11 +135,7 @@ export async function settleExpiredAuctions() {
     const completed = await prisma.$transaction((tx) =>
       completeInTransaction(tx, auction.id, "expired"),
     );
-    if (completed.status === "COMPLETED") {
-      clearAuctionClose(completed.id);
-      publishAuctionCompleted(completed);
-      await invalidateAuctionCache(completed.id);
-    }
+    await announceCompletion(completed);
   }
 }
 
@@ -277,10 +288,8 @@ export async function resume(actor: Actor, id: string) {
     const completed = await prisma.$transaction((tx) =>
       completeInTransaction(tx, id, "expired"),
     );
-    if (completed.status === "COMPLETED") {
-      clearAuctionClose(completed.id);
-      publishAuctionCompleted(completed);
-      await invalidateAuctionCache(completed.id);
+    if (completed.auction.status === "COMPLETED") {
+      await announceCompletion(completed);
       throw new AppError("AUCTION_EXPIRED", "This auction has ended.", 409);
     }
   }
@@ -300,12 +309,7 @@ export async function end(actor: Actor, id: string) {
   const completed = await prisma.$transaction((tx) =>
     completeInTransaction(tx, id, "manual"),
   );
-  if (completed.status === "COMPLETED") {
-    clearAuctionClose(completed.id);
-    publishAuctionCompleted(completed);
-    await invalidateAuctionCache(completed.id);
-  }
-  return completed;
+  return announceCompletion(completed);
 }
 
 export async function cancel(actor: Actor, id: string) {
@@ -351,14 +355,10 @@ export async function expireIfNeeded(id: string) {
     const completed = await prisma.$transaction((tx) =>
       completeInTransaction(tx, id, "expired"),
     );
-    if (completed.status === "COMPLETED") {
-      clearAuctionClose(completed.id);
-      publishAuctionCompleted(completed);
-      await invalidateAuctionCache(completed.id);
-    }
+    const auctionAfter = await announceCompletion(completed);
     return {
-      expired: completed.status === "COMPLETED",
-      auction: completed,
+      expired: auctionAfter.status === "COMPLETED",
+      auction: auctionAfter,
     };
   }
   return { expired: false as const, auction };
