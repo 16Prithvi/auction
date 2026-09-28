@@ -1,0 +1,72 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  BIDDER
+  AUCTIONEER
+  ADMIN
+}
+
+enum AuctionStatus {
+  DRAFT
+  SCHEDULED
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+model User {
+  id           String    @id @default(uuid())
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         Role      @default(BIDDER)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  auctions     Auction[] @relation("AuctionCreator")
+  wins         Auction[] @relation("AuctionWinner")
+  bids         Bid[]
+}
+
+model Auction {
+  id                  String        @id @default(uuid())
+  title               String
+  description         String
+  startingPrice       Decimal       @db.Decimal(12, 2)
+  currentPrice        Decimal       @db.Decimal(12, 2)
+  minimumBidIncrement Decimal       @db.Decimal(12, 2)
+  status              AuctionStatus @default(DRAFT)
+  scheduledStartAt    DateTime
+  startedAt           DateTime?
+  endsAt              DateTime
+  createdById         String
+  createdBy           User          @relation("AuctionCreator", fields: [createdById], references: [id])
+  winnerId            String?
+  winner              User?         @relation("AuctionWinner", fields: [winnerId], references: [id])
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  bids                Bid[]
+
+  @@index([status, endsAt])
+  @@index([createdById])
+}
+
+model Bid {
+  id        String   @id @default(uuid())
+  auctionId String
+  auction   Auction  @relation(fields: [auctionId], references: [id])
+  bidderId  String
+  bidder    User     @relation(fields: [bidderId], references: [id])
+  amount    Decimal  @db.Decimal(12, 2)
+  createdAt DateTime @default(now())
+
+  @@index([auctionId, createdAt])
+  @@index([bidderId])
+}
