@@ -1,171 +1,253 @@
-# Real-time auction and bidding engine
+# Real-time auction platform
 
-Small auction platform for demonstrating backend engineering: REST, PostgreSQL transactions, concurrent bidding, Socket.IO, Redis, Docker, and deployment.
+English ascending auctions. People register, auctioneers open a sale, and bidders compete in a live room. The server decides the price, whether a bid is valid, when the auction ends, and who won. The browser displays that decision. It does not make it.
 
-The UI talks to the API. Bids, winners, and anti-sniping are decided in PostgreSQL. Clients in an auction room receive those results over Socket.IO.
-
-## Project overview
-
-Users will register, browse auctions, and bid in a live room. Auctioneers will create and manage auctions. The backend is authoritative for price, status, expiry, bid validity, and the winner.
+Money is a PostgreSQL decimal. The API sends it as a string such as `"110.50"`.
 
 ## Architecture
 
-Modular monolith. One Next.js client, one Express API, PostgreSQL as the source of truth, Redis for cache and cross-instance events, Socket.IO for live updates.
+One Next.js client and one Express process, or several Express processes that share PostgreSQL and Redis. Prisma is pinned to 6 because Prisma 7 drops `url` from the schema and requires a driver adapter.
+
+![Browser to API, PostgreSQL, and Redis](docs/images/architecture.svg)
 
 ```
-frontend (Next.js)
-    |
-    |  REST + Socket.IO
-    v
-backend (Express, one or more instances)
-    |                |
-    v                v
-PostgreSQL         Redis
+Browser
+  │
+  ├── REST ──────────────► Express
+  │                         ├── PostgreSQL   source of truth, row lock per bid
+  │                         └── Redis        cache-aside
+  │
+  └── Socket.IO ─────────► Express processes
+                            └── Redis Pub/Sub (Socket.IO adapter)
 ```
 
-Redis caches auction reads. The Socket.IO Redis adapter uses Redis Pub/Sub so a bid accepted on one backend process reaches clients connected to another.
+| Piece | Role |
+| --- | --- |
+| Next.js, TypeScript, Tailwind | Listing, details, live room, create, dashboard |
+| Express, Socket.IO | HTTP API and auction rooms |
+| PostgreSQL, Prisma 6 | Users, auctions, bids |
+| Redis, ioredis | Read cache and the Socket.IO adapter |
+| Docker Compose | Postgres, Redis, and the API image |
+| k6 | HTTP load. Socket.IO checks use `socket.io-client` |
+| Vercel and Railway | Intended hosts. Not created from this environment |
 
-Prisma is pinned to 6. Prisma 7 removes `url` from the schema and requires a driver adapter. Version 6 keeps the usual schema and client, which is enough for this project.
+## Request flow
 
-## Tech stack
+1. The browser stores the login token and sends `Authorization: Bearer` on REST calls.
+2. A bid is one database transaction. The auction row is locked, the bid is checked, then the bid row and the new price are written together.
+3. After commit, the API deletes the Redis keys for that auction and emits `bid:accepted` to room `auction:{id}`.
+4. The Socket.IO Redis adapter publishes that emit. Every API process delivers it to its own sockets in the room.
+5. Clients already in the room update the price from the event. On connect, including reconnect, the live room joins the room again and loads the auction once. It does not poll.
 
-| Area                     | Choice                                                  |
-| ------------------------ | ------------------------------------------------------- |
-| Frontend                 | Next.js, TypeScript, Tailwind CSS, Socket.IO client     |
-| Backend                  | Node.js, TypeScript, Express, Socket.IO                 |
-| Database                 | PostgreSQL, Prisma 6                                    |
-| Cache / realtime fan-out | Redis, ioredis, Socket.IO Redis adapter                 |
-| Containers               | Docker Compose                                          |
-| Load tests               | k6 (later)                                              |
-| Deploy                   | Vercel (frontend), Railway (backend, PostgreSQL, Redis) |
+Listing and detail pages load over REST. Only the live room joins the socket room.
 
-## How bidding works
+## PostgreSQL is the source of truth
 
-English ascending auction. The auction starts at `startingPrice`. A bid is accepted only when the auction is `ACTIVE`, the caller is not the auctioneer, and the amount is at least the current price plus `minimumBidIncrement`. Prices are PostgreSQL decimals. The accepted bid becomes `currentPrice`.
+Users, auctions, and bids live in PostgreSQL. A bid is accepted only when the locked row says the auction is `ACTIVE`, the caller is not the owner, `endsAt` is still in the future, and the amount is at least `currentPrice + minimumBidIncrement`. The accepted amount becomes `currentPrice`.
 
-If that bid arrives with `ANTI_SNIPE_WINDOW_SECONDS` or less remaining (default 10), the server adds `ANTI_SNIPE_EXTENSION_SECONDS` (default 10) to `endsAt`. Each later valid bid in the new window extends it again. Set either value to `0` to turn the rule off.
+Auction states are `DRAFT`, `SCHEDULED`, `ACTIVE`, `PAUSED`, `COMPLETED`, and `CANCELLED`. Creating an auction with a future start time stores `SCHEDULED`. A start time already in the past stores `DRAFT`. The owner or an admin starts it. Bids are refused until it is `ACTIVE`.
 
-Ending an auction, or reaching `endsAt`, sets the winner to the highest bid. The earlier bid wins a tie. The response tells the caller whether `endsAt` changed. After the database commit, the server emits that result to the auction room.
+Ending an auction, or reaching `endsAt`, sets the winner to the highest bid. The earlier bid wins a tie. A paused auction whose end time has passed completes instead of resuming.
 
-## Concurrency problem
+If Redis is empty, wrong, or down, the next read loads PostgreSQL. A failed cache delete does not roll back the bid.
 
-Two bids can read the same price. If both then write, the auction can keep the lower price or record two winners for one step.
+## Redis cache-aside
 
-## Concurrency solution
+Hot reads are the auction list, one auction including its bids, and the bid history.
 
-Accepting a bid is one database transaction:
+| Key | TTL | Value |
+| --- | --- | --- |
+| `cache:auction:{id}` | 60s | Auction detail, including bids |
+| `cache:auction:{id}:bids` | 60s | Bid history |
+| `cache:auctions:all` | 30s | Unfiltered list |
+| `cache:auctions:status:{status}` | 30s | One status |
 
-1. `SELECT ... FOR UPDATE` locks the auction row. Other bids and the completion path wait.
-2. The lock is the read of record. Status, price, increment, `endsAt`, and owner are checked on that row.
-3. If `endsAt` has passed, the same transaction marks the auction `COMPLETED`, stores the winner, and the bid is rejected with `AUCTION_EXPIRED`.
-4. Otherwise the bid row is inserted and `currentPrice` is updated. Anti-sniping changes `endsAt` in that same update.
-5. Commit releases the lock. The HTTP response is the accepted result, and the server then emits `bid:accepted` to `auction:{id}`.
+A miss reads PostgreSQL and stores JSON. A hit returns that JSON and does not read the auction or bid tables. `GET /auctions`, `GET /auctions/:id`, and `GET /auctions/:id/bids` send `X-Cache: HIT` or `X-Cache: MISS`.
 
-There is no sleep and no client-side decision. A load test of this path is Phase 8.
+After a create, update, bid, or status change commits, those keys are deleted. The TTL only bounds a missed delete. Dashboard routes under `/me` are not cached.
 
-## Why WebSockets are used
+## Redis Pub/Sub and Socket.IO
 
-Polling would lag and add load. Socket.IO pushes accepted bids, status changes, and completion to clients in `auction:{id}`. The client displays server state; it does not decide it.
+When `REDIS_URL` is set, the process attaches `@socket.io/redis-adapter` before it listens. Room emits go through Redis Pub/Sub, so a client connected to process B receives a bid accepted on process A.
 
-A connection sends the same bearer token in `auth.token`. The server checks that token before accepting the socket. The client joins with `auction:join`. Socket.IO reconnects on its own. On each connect, including reconnect, the client joins the room again and loads the auction once. It does not poll.
-
-Events, all sent after the database commit:
+Events, all after commit:
 
 - `bid:accepted` — bid, current price, next minimum, `endsAt`, and whether anti-sniping extended the auction
 - `auction:updated` — start, pause, resume, or cancel
-- `auction:completed` — winner and final price when the auction ends
+- `auction:completed` — winner and final price
 
-The API also schedules one timer per open auction for `endsAt`. That timer closes the auction and emits `auction:completed`. It is not a one-second poll. Each process may run that timer. Only the process that changes the row emits completion, and the Redis adapter delivers it to every process in the room.
+The handshake must carry the same bearer token in `auth.token`. The server checks it before accepting the socket. The client joins with `auction:join`.
 
-## Why Redis is used
+Each process schedules its own timer for `endsAt`. That timer is not a one-second poll. Only the transaction that actually changes the row emits `auction:completed`, so two processes do not both announce the same ending.
 
-- Cache-aside for auction list, auction detail, and bid history. PostgreSQL remains the source of truth. A miss reads PostgreSQL and stores the JSON. A hit returns that JSON and does not read the auction or bid tables.
-- Keys: `cache:auction:{id}` and `cache:auction:{id}:bids` live for 60 seconds. `cache:auctions:all` and `cache:auctions:status:{status}` live for 30 seconds. The TTL is only a backstop.
-- After a create, update, bid, or status change commits, those keys are deleted. The next read loads PostgreSQL again. Cached routes send `X-Cache: HIT` or `X-Cache: MISS`.
-- If Redis is down, reads use PostgreSQL and writes still commit. A Redis error does not roll back the auction. Socket.IO keeps working for clients connected to that same process, without cross-process fan-out.
-- The Socket.IO Redis adapter publishes room events on Redis Pub/Sub. `io.to("auction:{id}").emit(...)` on one process is delivered to sockets joined to that room on every process that shares `REDIS_URL`. Cache deletes are already shared because every process uses the same Redis keys.
+If Redis is down at startup, the adapter stays off. That process still accepts bids and still emits to its own sockets.
+
+## Concurrent bidding
+
+Two bids can read the same price. If both then write, the lower price can win or two bids can look valid for one step.
+
+Accepting a bid is one transaction:
+
+1. `SELECT ... FOR UPDATE` locks the auction row. Other bids and the completion path wait.
+2. Status, price, increment, `endsAt`, and owner are read from that locked row.
+3. If `endsAt` has passed, the same transaction marks the auction `COMPLETED`, stores the winner, and the bid is rejected with `AUCTION_EXPIRED`.
+4. Otherwise the bid is inserted and `currentPrice` is updated. Anti-sniping changes `endsAt` in that same update.
+5. Commit releases the lock. The HTTP response and the socket event both describe that committed result.
+
+There is no sleep and no client-side price check that the server trusts. A bid below the new minimum returns `409 BID_TOO_LOW` and leaves the stored price unchanged.
+
+## Anti-sniping
+
+If a valid bid arrives with `ANTI_SNIPE_WINDOW_SECONDS` or less remaining (default 10), the server adds `ANTI_SNIPE_EXTENSION_SECONDS` (default 10) to `endsAt`. A later valid bid in the new window can extend it again. Set either value to `0` to turn the rule off. The bid response includes `extended` and the authoritative `endsAt`. The socket event carries the same fields.
+
+## Authentication
+
+Public registration creates a `BIDDER` or an `AUCTIONEER`. `ADMIN` is not self-serve. Passwords are hashed with bcrypt cost 12. Login returns an HS256 JWT, `{ sub: userId }`, valid for 7 days. `requireAuth` loads the user from PostgreSQL on each HTTP request. Login and register are limited to 30 requests per 15 minutes per IP. The API trusts one proxy hop so that limit still works behind Railway.
+
+Errors are `{ "success": false, "error": { "code", "message" } }`. Codes include `BID_TOO_LOW`, `AUCTION_NOT_ACTIVE`, `AUCTION_EXPIRED`, `FORBIDDEN`, `UNAUTHORIZED`, and `VALIDATION_ERROR`.
+
+## Why these choices
+
+**PostgreSQL.** A bid has to be consistent with the price, the end time, and the winner. A transaction plus a row lock is the mechanism that serializes two people bidding on the same auction.
+
+**Redis for reads.** Auction pages are read far more often than they are written. Cache-aside keeps those reads off PostgreSQL when nothing has changed.
+
+**Delete the key instead of waiting for the TTL.** A bid changes the price immediately. A 60-second TTL alone would keep serving the old price. The TTL is only a backstop.
+
+**Redis Pub/Sub.** Socket.IO clients are tied to the process that accepted their connection. Pub/Sub, through the Socket.IO adapter, is how a bid on one process reaches clients on another. The cache does not need a second bus: every process deletes the same Redis keys.
+
+**The browser does not decide.** The countdown is display-only. A bid that the server rejects does not change the price on screen except to show the error.
 
 ## Deployment
 
-The API image is `backend/Dockerfile`. Compose runs PostgreSQL, Redis, and that image. The image applies migrations, then listens on `PORT` (4000 inside Compose). `GET /health` is the health check.
+`backend/Dockerfile` builds the API. On start it retries `prisma migrate deploy`, then listens on `PORT`. Compose runs PostgreSQL, Redis, and that image. `GET /health` is the health check.
 
-Remote target: frontend on Vercel, backend plus PostgreSQL and Redis on Railway. No live URLs are recorded here yet. This environment has no Vercel or Railway credentials, so those hosts were not created.
+```bash
+docker compose up --build
+```
 
-Railway, three services from this repo's GitHub connection:
-
-1. PostgreSQL and Redis from the Railway database plugins.
-2. Backend service. Set the root directory to `backend` so the Docker build context matches `backend/Dockerfile`. `backend/railway.toml` selects that Dockerfile and checks `/health`.
-3. Variables on the backend service: `DATABASE_URL` and `REDIS_URL` from the plugins, a long random `JWT_SECRET`, and `CORS_ORIGIN` set to the Vercel origin (`https://…`, no trailing slash). Railway sets `PORT`. Do not use `change-me-local-only` outside this Compose file.
-
-Vercel project for `frontend`, framework Next.js. Set these before the production build, then redeploy, because Next inlines them:
-
-- `NEXT_PUBLIC_API_URL` = the Railway public API origin
-- `NEXT_PUBLIC_SOCKET_URL` = the same origin
-
-The live room and the API must both use that public HTTPS origin. Socket.IO stays on the API port.
-
-If host ports 5432 or 6379 are already taken, Compose can publish different ones:
+If 5432, 6379, or 4000 are already taken:
 
 ```bash
 POSTGRES_PORT=5433 REDIS_PORT=6380 BACKEND_PORT=4010 docker compose up --build
 ```
 
-## Performance testing
+The intended remote layout is the frontend on Vercel and the API, PostgreSQL, and Redis on Railway. Those hosts were not created here: this environment has no Vercel or Railway credentials, so there is no public URL.
 
-Measured on 28 September 2026 (UTC) on this machine, not on Railway or Vercel. One API process (`node dist/server.js` on port 4000) unless a row says otherwise. Node.js 22.14.0, PostgreSQL 16.15, Redis 7.0.15, k6 1.4.2. 4 vCPU, 16 GB RAM. The database and Redis were on localhost. Nothing else was driven at the same time except the checks below.
+When you do deploy:
 
-Re-run, with the API already listening on port 4000 and Redis on port 6379:
+- Railway service root directory: `backend`. `backend/railway.toml` selects the Dockerfile and checks `/health`.
+- Backend variables: `DATABASE_URL` and `REDIS_URL` from the Railway plugins, a long random `JWT_SECRET`, and `CORS_ORIGIN` set to the Vercel origin with no trailing slash. Do not use `change-me-local-only` outside local Compose.
+- Vercel root directory: `frontend`. Set `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_SOCKET_URL` to the Railway origin **before** the production build. Next inlines them.
+- Use the Vercel origin in the browser as well. `http://127.0.0.1:3000` is a different origin from `http://localhost:3000` and will fail CORS if `CORS_ORIGIN` is localhost.
+
+## Run it locally
+
+Requirements: Node.js 22+, npm, Docker with Compose.
+
+```bash
+cp .env.example .env
+cp frontend/.env.example frontend/.env.local
+docker compose up --build
+```
+
+API health: `http://localhost:4000/health`
+
+Frontend, in another terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`. Register an auctioneer, create an auction, press Start, then open the live room from a bidder account. The room shows Connected only after the socket accepts the token.
+
+Without Docker for the API (Postgres and Redis still from Compose):
+
+```bash
+docker compose up postgres redis
+cd backend
+npm install
+npx prisma migrate deploy
+npm run dev
+```
+
+`DATABASE_URL` and `JWT_SECRET` are required. There is no code fallback.
+
+Useful routes:
+
+- `POST /auth/register` and `POST /auth/login` return `{ token, user }`
+- `GET /me`, `GET /me/auctions`, `GET /me/bids`
+- `GET /auctions`, `POST /auctions`, `GET /auctions/:id`
+- `POST /auctions/:id/start|pause|resume|end|cancel`
+- `POST /auctions/:id/bids` with `{ "amount": "110.50" }`
+
+## Screens
+
+The live room below is two signed-in browsers on one auction. The bid was placed in the bidder window. The other window received it over Socket.IO.
+
+[Two-window live bidding](docs/two-window-live-bidding.mp4)
+
+![Auction list](docs/images/listing.png)
+
+![Auction details](docs/images/details.png)
+
+![Bidder live room after an accepted bid](docs/images/live-bidder.png)
+
+![Other browser showing the same bid](docs/images/live-other.png)
+
+![Auctioneer dashboard](docs/images/dashboard.png)
+
+## Performance
+
+These are local measurements from 28 September 2026 (UTC), not production benchmarks and not Railway. One API process on port 4000 unless a row says otherwise. Node.js 22.14.0, PostgreSQL 16.15, Redis 7.0.15, k6 1.4.2, 4 vCPU, 16 GB RAM. Postgres and Redis were on localhost.
+
+Re-run with the API on port 4000 and Redis on port 6379:
 
 ```bash
 node load/run.mjs
 ```
 
-k6 does not speak Socket.IO. HTTP load is k6. Socket.IO checks use `socket.io-client`.
-
 ### Smoke
 
-Register, start an auction at `100.00`, reject a `50.00` bid without changing the price, accept `110.00`, deliver that price on Socket.IO, and end the auction with that bidder as the winner. The first detail read was `X-Cache: MISS` (5.38 ms). The next was `HIT` (1.25 ms).
+A `50.00` bid left the price at `100.00`. A `110.00` bid was stored, arrived on Socket.IO, and became the winner when the auction was ended. The first detail read was `X-Cache: MISS` (5.38 ms). The next was `HIT` (1.25 ms).
 
-### Concurrent bids and row locks
+### Concurrent bidding
 
-Thirty bids from `110.00` through `400.00` were submitted together on one auction.
+Thirty bids from `110.00` through `400.00` were in flight together.
 
 | Result | Value |
 | --- | --- |
 | Accepted | 24 |
 | `BID_TOO_LOW` | 6 |
-| Other HTTP statuses | 0 |
+| Other statuses | 0 |
 | Duplicate stored amounts | 0 |
-| Final `currentPrice` | `400.00` |
+| Final price | `400.00` |
 
-Six lower bids lost the race after a higher bid already held the row lock. The stored price is the highest accepted amount, and no amount was stored twice.
-
-k6 then sent 40 bids, one per VU, amounts `110.00` through `500.00`, against a fresh auction (`per-vu-iterations`, 1 iteration each). `201` and `409` were the only expected statuses.
+k6 then sent 40 virtual users, one bid each, amounts `110.00` through `500.00`.
 
 | Metric | Value |
 | --- | --- |
-| Requests | 40 |
-| Requests/sec | 506.21 |
+| Requests/sec | 506.21 over that burst |
 | Unexpected error rate | 0 |
 | p50 | 55.07 ms |
 | p95 | 74.75 ms |
 | p99 | 76.44 ms |
-| Stored bids | 1 |
-| Duplicate amounts | 0 |
 | Final price | `500.00` |
 
-The `500.00` bid took the lock first, so the other 39 were correctly `BID_TOO_LOW`. The requests/sec figure is that short burst (40 requests finished in well under a second), not a long soak.
+The `500.00` bid took the lock first, so it was the only row stored and the other 39 were `BID_TOO_LOW`. That is the lock working, not a dropped write. The requests/sec number is the burst, not a long soak.
 
 ### Cached reads
 
-Twenty sequential detail reads after deleting `cache:auction:{id}`, then twenty reads left in cache. Percentiles are nearest-rank.
+Twenty sequential misses (the detail key was deleted first), then twenty hits. Percentiles are nearest rank, rounded to 0.01 ms.
 
 | | p50 | p95 | p99 |
 | --- | --- | --- | --- |
-| Miss (PostgreSQL, then Redis) | 3.17 ms | 3.86 ms | 4.69 ms |
-| Hit (Redis) | 0.78 ms | 0.94 ms | 1.08 ms |
+| Miss | 3.17 ms | 3.86 ms | 4.69 ms |
+| Hit | 0.78 ms | 0.94 ms | 1.08 ms |
 
-k6 then held 20 virtual users on `GET /auctions/:id` for 20 seconds after one warmup miss. Every response was HTTP 200 and `X-Cache: HIT`.
+k6 then held 20 virtual users on `GET /auctions/:id` for 20 seconds. Every response was HTTP 200 and `X-Cache: HIT`.
 
 | Metric | Value |
 | --- | --- |
@@ -176,80 +258,29 @@ k6 then held 20 virtual users on `GET /auctions/:id` for 20 seconds after one wa
 | p95 | 3.17 ms |
 | p99 | 4.57 ms |
 
-The k6 hit latency is higher than the one-at-a-time samples because 20 clients were in flight together.
+Hit latency under k6 is higher than the one-at-a-time samples because 20 clients were in flight together.
 
-### Socket.IO fan-out
+### Fan-out and Redis down
 
-A second API process listened on port 4002 with the same Redis. Ten Socket.IO clients connected to port 4000 and ten to port 4002 (20/20 connected in 70.23 ms). One bid of `110.00` was posted to port 4000. All 20 clients, including the ten on the other process, received `bid:accepted` with `110.00`.
+Ten Socket.IO clients on port 4000 and ten on port 4002 all connected (70.23 ms). All 20 received a `110.00` bid that was posted only to port 4000.
 
-### Redis unavailable
+An API pointed at `redis://127.0.0.1:6399` (nothing listening) still returned `201` for a bid. PostgreSQL stored `110.00`. A socket on that same process received it. The following read was `X-Cache: MISS`. That process could not fan out to other processes.
 
-An API on port 4003 used `REDIS_URL=redis://127.0.0.1:6399` (nothing listening). A bid still returned 201 at `110.00`. PostgreSQL stored `110.00`. A socket on that same process received `110.00`. The following detail read was `X-Cache: MISS`. Cross-process fan-out was not available on that process because the adapter did not connect.
+## Known limitations
 
-## How to run locally
+- There is no public Vercel or Railway deployment yet.
+- The live room is the only page that receives pushes. The list and the details page stay on the REST response until reload.
+- The on-screen countdown does not close the auction. The server does, on the end timer or on the next read or bid that finds `endsAt` in the past.
+- Cache-aside can briefly store a stale value if a read that started before a write finishes its `SET` after the write's `DEL`. The TTL bounds that window.
+- `/me` is not cached. Each authenticated HTTP call also reads the user row.
+- k6 does not speak Socket.IO, so fan-out was measured with `socket.io-client`.
+- One CORS origin. It must match the page origin exactly.
+- No payments, search engine, or second database.
 
-Requirements: Node.js 22+, npm, Docker with Compose.
-
-```bash
-cp .env.example .env
-cp frontend/.env.example frontend/.env.local
-
-docker compose up --build
-```
-
-API health: `http://localhost:4000/health`
-
-Frontend, without Docker:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Open `http://localhost:3000`. Register an account, then use the API through the pages. The live room sends each bid to the server and also applies bids, status changes, and completion pushed to that auction room. Sign in so the socket can authenticate. Use `http://localhost:3000`, not `127.0.0.1`, so the page origin matches `CORS_ORIGIN`.
-
-Backend, without Docker (Postgres and Redis still come from Compose):
-
-```bash
-docker compose up postgres redis
-cd backend
-npm install
-npx prisma migrate deploy
-npm run dev
-```
-
-The API reads `DATABASE_URL` and `JWT_SECRET`. Copy `.env.example` to `.env` before starting it.
-
-Useful routes:
-
-- `POST /auth/register` and `POST /auth/login` return a bearer token
-- `GET /me`, `GET /me/auctions`, `GET /me/bids`
-- `GET /auctions`, `POST /auctions`, `GET /auctions/:id`
-- `POST /auctions/:id/start|pause|resume|end|cancel`
-- `POST /auctions/:id/bids` with `{ "amount": "110.50" }`. The response includes `extended` and the authoritative `endsAt`.
-
-Money is sent as decimal strings. Errors look like `{ "success": false, "error": { "code": "BID_TOO_LOW", "message": "..." } }`.
-
-Checks:
+## Checks
 
 ```bash
 cd backend && npm run typecheck && npm run lint && npm run build
 cd frontend && npm run lint && npm run build
 node load/run.mjs
 ```
-
-## Phase status
-
-| Phase                   | Status                                      |
-| ----------------------- | ------------------------------------------- |
-| 0 Foundation            | Done in this tree                           |
-| 1 Light frontend        | Replaced by the API in Phase 4              |
-| 2 Backend and database  | Done                                        |
-| 3 Concurrent bidding    | Done. Measured in Phase 8                   |
-| 4 Connect frontend      | Done                                        |
-| 5 WebSockets            | Done                                        |
-| 6 Redis                 | Done. Cache-aside and the Socket.IO adapter |
-| 7 Docker and deployment | Image runs with Compose Postgres and Redis. Hosts not created |
-| 8 Testing and metrics   | Measured on this machine, 28 September 2026 |
-| 9 Final cleanup         | Not started                                 |
