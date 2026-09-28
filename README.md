@@ -112,7 +112,79 @@ POSTGRES_PORT=5433 REDIS_PORT=6380 BACKEND_PORT=4010 docker compose up --build
 
 ## Performance testing
 
-No benchmarks have been run. No resume metrics exist yet. k6 results will be recorded here only after they are measured, with scenario, configuration, result, date, and environment.
+Measured on 28 September 2026 (UTC) on this machine, not on Railway or Vercel. One API process (`node dist/server.js` on port 4000) unless a row says otherwise. Node.js 22.14.0, PostgreSQL 16.15, Redis 7.0.15, k6 1.4.2. 4 vCPU, 16 GB RAM. The database and Redis were on localhost. Nothing else was driven at the same time except the checks below.
+
+Re-run, with the API already listening on port 4000 and Redis on port 6379:
+
+```bash
+node load/run.mjs
+```
+
+k6 does not speak Socket.IO. HTTP load is k6. Socket.IO checks use `socket.io-client`.
+
+### Smoke
+
+Register, start an auction at `100.00`, reject a `50.00` bid without changing the price, accept `110.00`, deliver that price on Socket.IO, and end the auction with that bidder as the winner. The first detail read was `X-Cache: MISS` (5.38 ms). The next was `HIT` (1.25 ms).
+
+### Concurrent bids and row locks
+
+Thirty bids from `110.00` through `400.00` were submitted together on one auction.
+
+| Result | Value |
+| --- | --- |
+| Accepted | 24 |
+| `BID_TOO_LOW` | 6 |
+| Other HTTP statuses | 0 |
+| Duplicate stored amounts | 0 |
+| Final `currentPrice` | `400.00` |
+
+Six lower bids lost the race after a higher bid already held the row lock. The stored price is the highest accepted amount, and no amount was stored twice.
+
+k6 then sent 40 bids, one per VU, amounts `110.00` through `500.00`, against a fresh auction (`per-vu-iterations`, 1 iteration each). `201` and `409` were the only expected statuses.
+
+| Metric | Value |
+| --- | --- |
+| Requests | 40 |
+| Requests/sec | 506.21 |
+| Unexpected error rate | 0 |
+| p50 | 55.07 ms |
+| p95 | 74.75 ms |
+| p99 | 76.44 ms |
+| Stored bids | 1 |
+| Duplicate amounts | 0 |
+| Final price | `500.00` |
+
+The `500.00` bid took the lock first, so the other 39 were correctly `BID_TOO_LOW`. The requests/sec figure is that short burst (40 requests finished in well under a second), not a long soak.
+
+### Cached reads
+
+Twenty sequential detail reads after deleting `cache:auction:{id}`, then twenty reads left in cache. Percentiles are nearest-rank.
+
+| | p50 | p95 | p99 |
+| --- | --- | --- | --- |
+| Miss (PostgreSQL, then Redis) | 3.17 ms | 3.86 ms | 4.69 ms |
+| Hit (Redis) | 0.78 ms | 0.94 ms | 1.08 ms |
+
+k6 then held 20 virtual users on `GET /auctions/:id` for 20 seconds after one warmup miss. Every response was HTTP 200 and `X-Cache: HIT`.
+
+| Metric | Value |
+| --- | --- |
+| Requests | 180195 |
+| Requests/sec | 9009.08 |
+| Error rate | 0 |
+| p50 | 2.02 ms |
+| p95 | 3.17 ms |
+| p99 | 4.57 ms |
+
+The k6 hit latency is higher than the one-at-a-time samples because 20 clients were in flight together.
+
+### Socket.IO fan-out
+
+A second API process listened on port 4002 with the same Redis. Ten Socket.IO clients connected to port 4000 and ten to port 4002 (20/20 connected in 70.23 ms). One bid of `110.00` was posted to port 4000. All 20 clients, including the ten on the other process, received `bid:accepted` with `110.00`.
+
+### Redis unavailable
+
+An API on port 4003 used `REDIS_URL=redis://127.0.0.1:6399` (nothing listening). A bid still returned 201 at `110.00`. PostgreSQL stored `110.00`. A socket on that same process received `110.00`. The following detail read was `X-Cache: MISS`. Cross-process fan-out was not available on that process because the adapter did not connect.
 
 ## How to run locally
 
@@ -178,5 +250,5 @@ cd frontend && npm run lint && npm run build
 | 5 WebSockets            | Done                                        |
 | 6 Redis                 | Done. Cache-aside and the Socket.IO adapter |
 | 7 Docker and deployment | Image runs with Compose Postgres and Redis. Hosts not created |
-| 8 Testing and metrics   | Not started                                 |
+| 8 Testing and metrics   | Measured on this machine, 28 September 2026 |
 | 9 Final cleanup         | Not started                                 |
