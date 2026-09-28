@@ -2,7 +2,7 @@
 
 Small auction platform for demonstrating backend engineering: REST, PostgreSQL transactions, concurrent bidding, Socket.IO, Redis, Docker, and deployment.
 
-This repository is at **Phase 0 (foundation)** only. Auction features are not implemented yet.
+The UI is at **Phase 1**. Screens use mock data in the browser. The API is not connected.
 
 ## Project overview
 
@@ -92,7 +92,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open `http://localhost:3000`. The pages are mock-only. Demo login: `ada@example.com` (bidder) or `ravi@example.com` (auctioneer), password `password123`. Placing a bid does not change the price.
 
 Backend, without Docker (Postgres and Redis still come from Compose):
 
@@ -115,7 +115,7 @@ cd frontend && npm run lint && npm run build
 | Phase                   | Status                          |
 | ----------------------- | ------------------------------- |
 | 0 Foundation            | Done in this tree               |
-| 1 Light frontend        | Not started                     |
+| 1 Light frontend        | Done. Mock data only            |
 | 2 Backend and database  | Not started                     |
 | 3 Concurrent bidding    | Not started                     |
 | 4 Connect frontend      | Not started                     |

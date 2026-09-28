@@ -1,7 +1,5 @@
+import { redirect } from "next/navigation";
+
 export default function Home() {
-  return (
-    <main>
-      <div>Auction</div>
-    </main>
-  );
+  redirect("/auctions");
 }
