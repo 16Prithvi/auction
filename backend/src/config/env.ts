@@ -25,12 +25,30 @@ export type AppEnv = {
   redisUrl: string | undefined;
   corsOrigin: string;
   jwtSecret: string;
+  antiSnipeWindowSeconds: number;
+  antiSnipeExtensionSeconds: number;
 };
 
 function required(source: NodeJS.ProcessEnv, name: string): string {
   const value = source[name];
   if (!value) {
     throw new Error(`Missing environment variable: ${name}`);
+  }
+  return value;
+}
+
+function readSeconds(
+  source: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+): number {
+  const raw = source[name];
+  if (raw === undefined || raw === "") {
+    return fallback;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0 || value > 3600) {
+    throw new Error(`Invalid ${name}: ${raw}`);
   }
   return value;
 }
@@ -51,6 +69,16 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     redisUrl: source.REDIS_URL,
     corsOrigin: source.CORS_ORIGIN ?? "http://localhost:3000",
     jwtSecret: required(source, "JWT_SECRET"),
+    antiSnipeWindowSeconds: readSeconds(
+      source,
+      "ANTI_SNIPE_WINDOW_SECONDS",
+      10,
+    ),
+    antiSnipeExtensionSeconds: readSeconds(
+      source,
+      "ANTI_SNIPE_EXTENSION_SECONDS",
+      10,
+    ),
   };
 }
 

@@ -10,6 +10,7 @@ import {
   highestBid,
   listAuctions,
   listAuctionsByCreator,
+  lockAuction,
   markCompleted,
   updateAuction,
   type Db,
@@ -40,8 +41,12 @@ function assertTransition(status: AuctionStatus, allowed: AuctionStatus[]) {
   }
 }
 
-async function completeInTransaction(db: Db, id: string) {
-  const auction = await findAuction(db, id);
+export async function completeInTransaction(
+  db: Db,
+  id: string,
+  mode: "manual" | "expired",
+) {
+  const auction = await lockAuction(db, id);
   if (!auction) {
     throw new AppError("AUCTION_NOT_FOUND", "Auction not found.", 404);
   }
@@ -54,6 +59,9 @@ async function completeInTransaction(db: Db, id: string) {
       `Cannot do that while the auction is ${auction.status}.`,
       409,
     );
+  }
+  if (mode === "expired" && auction.endsAt > new Date()) {
+    return auction;
   }
   const winningBid = await highestBid(db, id);
   const updated = await markCompleted(
@@ -79,7 +87,9 @@ async function completeInTransaction(db: Db, id: string) {
 export async function settleExpiredAuctions() {
   const due = await findExpiredAuctionIds(new Date());
   for (const auction of due) {
-    await prisma.$transaction((tx) => completeInTransaction(tx, auction.id));
+    await prisma.$transaction((tx) =>
+      completeInTransaction(tx, auction.id, "expired"),
+    );
   }
 }
 
@@ -201,8 +211,12 @@ export async function resume(actor: Actor, id: string) {
   assertOwner(auction, actor);
   assertTransition(auction.status, ["PAUSED"]);
   if (auction.endsAt <= new Date()) {
-    await prisma.$transaction((tx) => completeInTransaction(tx, id));
-    throw new AppError("AUCTION_EXPIRED", "This auction has ended.", 409);
+    const completed = await prisma.$transaction((tx) =>
+      completeInTransaction(tx, id, "expired"),
+    );
+    if (completed.status === "COMPLETED") {
+      throw new AppError("AUCTION_EXPIRED", "This auction has ended.", 409);
+    }
   }
   return updateAuction(id, { status: "ACTIVE" });
 }
@@ -213,12 +227,12 @@ export async function end(actor: Actor, id: string) {
     throw new AppError("AUCTION_NOT_FOUND", "Auction not found.", 404);
   }
   assertOwner(auction, actor);
-  return prisma.$transaction((tx) => completeInTransaction(tx, id));
+  return prisma.$transaction((tx) => completeInTransaction(tx, id, "manual"));
 }
 
 export async function cancel(actor: Actor, id: string) {
   return prisma.$transaction(async (tx) => {
-    const auction = await findAuction(tx, id);
+    const auction = await lockAuction(tx, id);
     if (!auction) {
       throw new AppError("AUCTION_NOT_FOUND", "Auction not found.", 404);
     }
@@ -252,9 +266,12 @@ export async function expireIfNeeded(id: string) {
     (auction.status === "ACTIVE" || auction.status === "PAUSED") &&
     auction.endsAt <= new Date()
   ) {
+    const completed = await prisma.$transaction((tx) =>
+      completeInTransaction(tx, id, "expired"),
+    );
     return {
-      expired: true as const,
-      auction: await prisma.$transaction((tx) => completeInTransaction(tx, id)),
+      expired: completed.status === "COMPLETED",
+      auction: completed,
     };
   }
   return { expired: false as const, auction };

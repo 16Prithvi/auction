@@ -4,6 +4,7 @@ import { z } from "zod";
 import { AppError } from "../lib/errors.js";
 import * as auctionService from "../services/auction-service.js";
 import * as bidService from "../services/bid-service.js";
+import { money } from "../utils/money.js";
 import { serializeAuction, serializeBid } from "../utils/serialize.js";
 import { listBids } from "../repositories/bid-repository.js";
 import type {
@@ -134,10 +135,21 @@ export async function myBids(req: Request, res: Response) {
 
 export async function placeBid(req: Request, res: Response) {
   const body = req.body as z.infer<typeof placeBidSchema>;
-  const bid = await bidService.placeBid(
+  const accepted = await bidService.placeBid(
     auctionId(req),
     actor(req).id,
     body.amount,
   );
-  res.status(201).json({ success: true, data: serializeBid(bid) });
+  res.status(201).json({
+    success: true,
+    data: {
+      bid: serializeBid(accepted.bid),
+      currentPrice: money(accepted.currentPrice),
+      minimumNextBid: money(
+        accepted.currentPrice.plus(accepted.minimumBidIncrement),
+      ),
+      endsAt: accepted.endsAt.toISOString(),
+      extended: accepted.extended,
+    },
+  });
 }

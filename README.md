@@ -2,7 +2,7 @@
 
 Small auction platform for demonstrating backend engineering: REST, PostgreSQL transactions, concurrent bidding, Socket.IO, Redis, Docker, and deployment.
 
-The UI is at **Phase 1** and still uses mock data. The API and PostgreSQL schema are at **Phase 2**. The frontend is not connected to the API yet.
+The UI is at **Phase 1** and still uses mock data. The API is at **Phase 3**: bids, winners, and anti-sniping are decided in PostgreSQL. The frontend is not connected to the API yet.
 
 ## Project overview
 
@@ -41,17 +41,27 @@ Prisma is pinned to 6. Prisma 7 removes `url` from the schema and requires a dri
 
 ## How bidding works
 
-English ascending auction. The auction starts at `startingPrice`. A bid is accepted only when the auction is `ACTIVE`, the caller is not the auctioneer, and the amount is at least the current price plus `minimumBidIncrement`. Prices are PostgreSQL decimals. The accepted bid becomes `currentPrice`. Ending an auction sets the winner to the highest bid, with the earlier bid winning a tie.
+English ascending auction. The auction starts at `startingPrice`. A bid is accepted only when the auction is `ACTIVE`, the caller is not the auctioneer, and the amount is at least the current price plus `minimumBidIncrement`. Prices are PostgreSQL decimals. The accepted bid becomes `currentPrice`.
 
-Anti-sniping is not implemented yet.
+If that bid arrives with `ANTI_SNIPE_WINDOW_SECONDS` or less remaining (default 10), the server adds `ANTI_SNIPE_EXTENSION_SECONDS` (default 10) to `endsAt`. Each later valid bid in the new window extends it again. Set either value to `0` to turn the rule off.
+
+Ending an auction, or reaching `endsAt`, sets the winner to the highest bid. The earlier bid wins a tie. The response tells the caller whether `endsAt` changed. Live broadcast of that result is a later phase.
 
 ## Concurrency problem
 
-Two bids can read the same price and both try to become the current price.
+Two bids can read the same price. If both then write, the auction can keep the lower price or record two winners for one step.
 
 ## Concurrency solution
 
-`POST /auctions/:id/bids` updates the price only when it still matches the price that was validated, inside a transaction. If another bid wins that race, a still-valid amount is tried again. Anti-sniping, a fuller write-up, and a load test are Phase 3.
+Accepting a bid is one database transaction:
+
+1. `SELECT ... FOR UPDATE` locks the auction row. Other bids and the completion path wait.
+2. The lock is the read of record. Status, price, increment, `endsAt`, and owner are checked on that row.
+3. If `endsAt` has passed, the same transaction marks the auction `COMPLETED`, stores the winner, and the bid is rejected with `AUCTION_EXPIRED`.
+4. Otherwise the bid row is inserted and `currentPrice` is updated. Anti-sniping changes `endsAt` in that same update.
+5. Commit releases the lock. The HTTP response is the accepted result. Nothing is broadcast until a later phase.
+
+There is no sleep and no client-side decision. A load test of this path is Phase 8.
 
 ## Why WebSockets are used
 
@@ -114,7 +124,7 @@ Useful routes:
 - `GET /me`, `GET /me/auctions`, `GET /me/bids`
 - `GET /auctions`, `POST /auctions`, `GET /auctions/:id`
 - `POST /auctions/:id/start|pause|resume|end|cancel`
-- `POST /auctions/:id/bids` with `{ "amount": "110.50" }`
+- `POST /auctions/:id/bids` with `{ "amount": "110.50" }`. The response includes `extended` and the authoritative `endsAt`.
 
 Money is sent as decimal strings. Errors look like `{ "success": false, "error": { "code": "BID_TOO_LOW", "message": "..." } }`.
 
@@ -132,7 +142,7 @@ cd frontend && npm run lint && npm run build
 | 0 Foundation            | Done in this tree               |
 | 1 Light frontend        | Done. Mock data only            |
 | 2 Backend and database  | Done. Frontend still uses mocks |
-| 3 Concurrent bidding    | Not started                     |
+| 3 Concurrent bidding    | Done. Load test is Phase 8      |
 | 4 Connect frontend      | Not started                     |
 | 5 WebSockets            | Not started                     |
 | 6 Redis                 | Not started                     |

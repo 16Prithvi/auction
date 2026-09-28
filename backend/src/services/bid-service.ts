@@ -1,16 +1,14 @@
+import { env } from "../config/env.js";
 import { AppError } from "../lib/errors.js";
 import { prisma } from "../lib/prisma.js";
-import {
-  claimCurrentPrice,
-  findAuction,
-} from "../repositories/auction-repository.js";
+import { lockAuction } from "../repositories/auction-repository.js";
 import {
   createBid,
   listBids,
   listBidsByBidder,
 } from "../repositories/bid-repository.js";
 import { decimal } from "../utils/money.js";
-import { expireIfNeeded } from "./auction-service.js";
+import { completeInTransaction, expireIfNeeded } from "./auction-service.js";
 
 export async function bidsForAuction(auctionId: string) {
   const settled = await expireIfNeeded(auctionId);
@@ -21,22 +19,14 @@ export function bidsForUser(userId: string) {
   return listBidsByBidder(userId);
 }
 
-const PRICE_CHANGED =
-  "The current price changed. Check the latest price and try again.";
-
-async function placeBidOnce(
+export async function placeBid(
   auctionId: string,
   bidderId: string,
   amountRaw: string,
 ) {
   const amount = decimal(amountRaw);
-  const settled = await expireIfNeeded(auctionId);
-  if (settled.expired) {
-    throw new AppError("AUCTION_EXPIRED", "This auction has ended.", 409);
-  }
-
-  return prisma.$transaction(async (tx) => {
-    const auction = await findAuction(tx, auctionId);
+  const result = await prisma.$transaction(async (tx) => {
+    const auction = await lockAuction(tx, auctionId);
     if (!auction) {
       throw new AppError("AUCTION_NOT_FOUND", "Auction not found.", 404);
     }
@@ -47,9 +37,18 @@ async function placeBidOnce(
         403,
       );
     }
-    if (auction.endsAt <= new Date()) {
-      throw new AppError("AUCTION_EXPIRED", "This auction has ended.", 409);
+
+    const now = new Date();
+    if (
+      (auction.status === "ACTIVE" || auction.status === "PAUSED") &&
+      auction.endsAt <= now
+    ) {
+      const completed = await completeInTransaction(tx, auctionId, "expired");
+      if (completed.status === "COMPLETED") {
+        return { expired: true as const };
+      }
     }
+
     if (auction.status !== "ACTIVE") {
       throw new AppError(
         "AUCTION_NOT_ACTIVE",
@@ -67,39 +66,35 @@ async function placeBidOnce(
       );
     }
 
-    const claimed = await claimCurrentPrice(
-      tx,
-      auction.id,
-      auction.currentPrice,
-      amount,
-    );
-    if (claimed.count !== 1) {
-      throw new AppError("BID_TOO_LOW", PRICE_CHANGED, 409);
-    }
+    const remainingMs = auction.endsAt.getTime() - now.getTime();
+    const extended =
+      env.antiSnipeWindowSeconds > 0 &&
+      env.antiSnipeExtensionSeconds > 0 &&
+      remainingMs <= env.antiSnipeWindowSeconds * 1000;
+    const endsAt = extended
+      ? new Date(
+          auction.endsAt.getTime() + env.antiSnipeExtensionSeconds * 1000,
+        )
+      : auction.endsAt;
 
-    return createBid(tx, { auctionId: auction.id, bidderId, amount });
+    const bid = await createBid(tx, { auctionId, bidderId, amount });
+    await tx.auction.update({
+      where: { id: auctionId },
+      data: { currentPrice: amount, endsAt },
+    });
+
+    return {
+      expired: false as const,
+      bid,
+      currentPrice: amount,
+      minimumBidIncrement: auction.minimumBidIncrement,
+      endsAt,
+      extended,
+    };
   });
-}
 
-export async function placeBid(
-  auctionId: string,
-  bidderId: string,
-  amountRaw: string,
-) {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      return await placeBidOnce(auctionId, bidderId, amountRaw);
-    } catch (error) {
-      lastError = error;
-      const raced =
-        error instanceof AppError &&
-        error.code === "BID_TOO_LOW" &&
-        error.message === PRICE_CHANGED;
-      if (!raced) {
-        throw error;
-      }
-    }
+  if (result.expired) {
+    throw new AppError("AUCTION_EXPIRED", "This auction has ended.", 409);
   }
-  throw lastError;
+  return result;
 }

@@ -30,6 +30,11 @@ export function findAuction(db: Db, id: string) {
   return db.auction.findUnique({ where: { id }, include: auctionInclude });
 }
 
+export async function lockAuction(db: Db, id: string) {
+  await db.$queryRaw`SELECT "id" FROM "Auction" WHERE "id" = ${id} FOR UPDATE`;
+  return findAuction(db, id);
+}
+
 export function findExpiredAuctionIds(now: Date) {
   return prisma.auction.findMany({
     where: {
@@ -52,18 +57,6 @@ export function updateAuction(
     where: { id },
     data,
     include: auctionInclude,
-  });
-}
-
-export function claimCurrentPrice(
-  db: Db,
-  id: string,
-  expectedPrice: Prisma.Decimal,
-  nextPrice: Prisma.Decimal,
-) {
-  return db.auction.updateMany({
-    where: { id, status: "ACTIVE", currentPrice: expectedPrice },
-    data: { currentPrice: nextPrice },
   });
 }
 
