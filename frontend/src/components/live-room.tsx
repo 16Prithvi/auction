@@ -1,34 +1,48 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import { ApiError, getAuction, placeBid } from "@/lib/api";
 import { formatInr } from "@/lib/money";
+import type { Auction, Bid } from "@/lib/types";
 import { Countdown } from "./countdown";
 import { StatusBadge } from "./status-badge";
-import { useMockDb } from "./use-mock-db";
 
 export function LiveRoom({ id }: { id: string }) {
-  const db = useMockDb();
-  const auction = db?.auctions.find((item) => item.id === id) ?? null;
-  const bids = (db?.bids ?? [])
-    .filter((bid) => bid.auctionId === id)
-    .slice()
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const [auction, setAuction] = useState<Auction | null>(null);
+  const [bids, setBids] = useState<Bid[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const [amount, setAmount] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [noticeError, setNoticeError] = useState(false);
+  const [pending, setPending] = useState(false);
 
-  if (db === null) {
-    return (
-      <main className="mx-auto w-full max-w-3xl px-4 py-8">
-        <p className="text-sm text-zinc-500">Loading auction…</p>
-      </main>
-    );
-  }
+  useEffect(() => {
+    let cancelled = false;
+    getAuction(id)
+      .then((data) => {
+        if (!cancelled) {
+          setAuction(data);
+          setBids(data.bids ?? []);
+        }
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setError(
+            caught instanceof ApiError ? caught.message : "Request failed.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
 
-  if (!auction) {
+  if (error) {
     return (
       <main className="mx-auto w-full max-w-3xl px-4 py-8">
         <h1 className="text-2xl font-semibold">Auction not found</h1>
+        <p className="mt-2 text-sm text-red-700">{error}</p>
         <Link href="/auctions" className="mt-4 inline-block text-sm underline">
           Back to auctions
         </Link>
@@ -36,9 +50,46 @@ export function LiveRoom({ id }: { id: string }) {
     );
   }
 
-  function onSubmit(event: FormEvent<HTMLFormElement>) {
+  if (!auction) {
+    return (
+      <main className="mx-auto w-full max-w-3xl px-4 py-8">
+        <p className="text-sm text-zinc-500">Loading auction…</p>
+      </main>
+    );
+  }
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setNotice("Not sent. The server will accept or reject this bid.");
+    setPending(true);
+    setNotice(null);
+    setNoticeError(false);
+    try {
+      const accepted = await placeBid(id, amount);
+      setAuction((current) =>
+        current
+          ? {
+              ...current,
+              currentPrice: accepted.currentPrice,
+              minimumNextBid: accepted.minimumNextBid,
+              endsAt: accepted.endsAt,
+            }
+          : current,
+      );
+      setBids((current) => [accepted.bid, ...current]);
+      setAmount("");
+      setNotice(
+        accepted.extended
+          ? "Bid accepted. The server extended the auction."
+          : "Bid accepted.",
+      );
+    } catch (caught) {
+      setNoticeError(true);
+      setNotice(
+        caught instanceof ApiError ? caught.message : "Request failed.",
+      );
+    } finally {
+      setPending(false);
+    }
   }
 
   return (
@@ -92,10 +143,12 @@ export function LiveRoom({ id }: { id: string }) {
           onChange={(event) => setAmount(event.target.value)}
           placeholder={formatInr(auction.minimumNextBid)}
           className="w-40 rounded-md border border-zinc-300 px-3 py-2 text-sm"
+          required
         />
         <button
           type="submit"
-          className="rounded-md bg-zinc-900 px-4 py-2 text-sm text-white"
+          disabled={pending}
+          className="rounded-md bg-zinc-900 px-4 py-2 text-sm text-white disabled:opacity-60"
         >
           Place bid
         </button>
@@ -104,7 +157,13 @@ export function LiveRoom({ id }: { id: string }) {
           Not connected
         </p>
       </form>
-      {notice ? <p className="mt-3 text-sm text-zinc-700">{notice}</p> : null}
+      {notice ? (
+        <p
+          className={`mt-3 text-sm ${noticeError ? "text-red-700" : "text-zinc-700"}`}
+        >
+          {notice}
+        </p>
+      ) : null}
 
       <section className="mt-8">
         <h2 className="text-sm font-medium text-zinc-500">Recent bids</h2>

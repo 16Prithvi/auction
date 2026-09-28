@@ -8,10 +8,22 @@ export type SessionUser = {
   name: string;
   email: string;
   role: Role;
+  createdAt: string;
+  updatedAt: string;
 };
 
-export type MockUser = SessionUser & {
-  password: string;
+export type Person = {
+  id: string;
+  name: string;
+};
+
+export type Bid = {
+  id: string;
+  auctionId: string;
+  bidderId: string;
+  bidderName: string;
+  amount: string;
+  createdAt: string;
 };
 
 export type Auction = {
@@ -25,26 +37,26 @@ export type Auction = {
   status: AuctionStatus;
   scheduledStartAt: string;
   startedAt: string | null;
-  endsAt: string | null;
-  createdBy: string;
-  createdByName: string;
-  winnerId: string | null;
-  winnerName: string | null;
+  endsAt: string;
+  createdBy: Person;
+  winner: Person | null;
   createdAt: string;
+  updatedAt: string;
+  bids?: Bid[];
 };
 
-export type Bid = {
-  id: string;
-  auctionId: string;
-  bidderId: string;
-  bidderName: string;
-  amount: string;
-  createdAt: string;
+export type MyBid = Bid & {
+  auction: {
+    id: string;
+    title: string;
+    status: AuctionStatus;
+  };
 };
 
-export type MockDb = {
-  users: MockUser[];
-  sessionUserId: string | null;
-  auctions: Auction[];
-  bids: Bid[];
+export type AcceptedBid = {
+  bid: Bid;
+  currentPrice: string;
+  minimumNextBid: string;
+  endsAt: string;
+  extended: boolean;
 };

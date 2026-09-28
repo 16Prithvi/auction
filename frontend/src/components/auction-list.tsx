@@ -1,25 +1,52 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
+import { ApiError, listAuctions } from "@/lib/api";
 import { formatInr, formatWhen } from "@/lib/money";
+import type { Auction } from "@/lib/types";
 import { StatusBadge } from "./status-badge";
-import { useMockDb } from "./use-mock-db";
 
 export function AuctionList() {
-  const db = useMockDb();
+  const [auctions, setAuctions] = useState<Auction[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listAuctions()
+      .then((data) => {
+        if (!cancelled) {
+          setAuctions(data);
+        }
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setError(
+            caught instanceof ApiError ? caught.message : "Request failed.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <main className="mx-auto w-full max-w-5xl px-4 py-8">
       <h1 className="text-2xl font-semibold tracking-tight">Auctions</h1>
       <p className="mt-2 text-sm text-zinc-600">
-        Sample listings stored in this browser. Prices and status come from the
-        mock records, not from a server.
+        Prices and status come from the server.
       </p>
-      {db === null ? (
+      {error ? <p className="mt-8 text-sm text-red-700">{error}</p> : null}
+      {auctions === null && !error ? (
         <p className="mt-8 text-sm text-zinc-500">Loading auctions…</p>
-      ) : (
+      ) : null}
+      {auctions && auctions.length === 0 ? (
+        <p className="mt-8 text-sm text-zinc-600">No auctions yet.</p>
+      ) : null}
+      {auctions && auctions.length > 0 ? (
         <ul className="mt-6 divide-y divide-zinc-200 border-y border-zinc-200">
-          {db.auctions.map((auction) => (
+          {auctions.map((auction) => (
             <li
               key={auction.id}
               className="flex flex-wrap items-center gap-3 py-4"
@@ -32,17 +59,15 @@ export function AuctionList() {
                   {auction.title}
                 </Link>
                 <p className="mt-1 text-sm text-zinc-600">
-                  {formatInr(auction.currentPrice)}
-                  {auction.endsAt
-                    ? ` · ends ${formatWhen(auction.endsAt)}`
-                    : ""}
+                  {formatInr(auction.currentPrice)} · ends{" "}
+                  {formatWhen(auction.endsAt)}
                 </p>
               </div>
               <StatusBadge status={auction.status} />
             </li>
           ))}
         </ul>
-      )}
+      ) : null}
     </main>
   );
 }

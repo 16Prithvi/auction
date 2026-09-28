@@ -2,8 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { logoutMock, sessionUser } from "@/lib/mock-db";
-import { useMockDb } from "./use-mock-db";
+import { useAuth } from "./auth-provider";
 
 const links = [
   { href: "/auctions", label: "Auctions" },
@@ -12,8 +11,7 @@ const links = [
 
 export function SiteHeader() {
   const pathname = usePathname();
-  const db = useMockDb();
-  const user = db ? sessionUser(db) : null;
+  const { user, logout } = useAuth();
 
   return (
     <header className="border-b border-zinc-200 bg-white">
@@ -55,7 +53,7 @@ export function SiteHeader() {
               </span>
               <button
                 type="button"
-                onClick={() => logoutMock()}
+                onClick={logout}
                 className="rounded-md border border-zinc-300 px-3 py-1.5"
               >
                 Log out

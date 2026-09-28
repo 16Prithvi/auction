@@ -1,16 +1,49 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
+import { ApiError, myAuctions, myBids } from "@/lib/api";
 import { formatInr } from "@/lib/money";
-import { sessionUser } from "@/lib/mock-db";
+import type { Auction, MyBid } from "@/lib/types";
+import { useAuth } from "./auth-provider";
 import { StatusBadge } from "./status-badge";
-import { useMockDb } from "./use-mock-db";
 
 export function Dashboard() {
-  const db = useMockDb();
-  const user = db ? sessionUser(db) : null;
+  const { user, ready } = useAuth();
+  const [auctions, setAuctions] = useState<Auction[]>([]);
+  const [bids, setBids] = useState<MyBid[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
-  if (db === null) {
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+    let cancelled = false;
+    const load =
+      user.role === "AUCTIONEER" || user.role === "ADMIN"
+        ? myAuctions().then((data) => {
+            if (!cancelled) {
+              setAuctions(data);
+            }
+          })
+        : myBids().then((data) => {
+            if (!cancelled) {
+              setBids(data);
+            }
+          });
+    load.catch((caught) => {
+      if (!cancelled) {
+        setError(
+          caught instanceof ApiError ? caught.message : "Request failed.",
+        );
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
+  if (!ready) {
     return (
       <main className="mx-auto w-full max-w-5xl px-4 py-8">
         <p className="text-sm text-zinc-500">Loading dashboard…</p>
@@ -32,17 +65,13 @@ export function Dashboard() {
     );
   }
 
-  const myAuctions = db.auctions.filter(
-    (auction) => auction.createdBy === user.id,
-  );
-  const myBids = db.bids.filter((bid) => bid.bidderId === user.id);
-
   return (
     <main className="mx-auto w-full max-w-5xl px-4 py-8">
       <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
       <p className="mt-2 text-sm text-zinc-600">
         {user.name} · {user.email} · {user.role}
       </p>
+      {error ? <p className="mt-4 text-sm text-red-700">{error}</p> : null}
 
       {user.role === "AUCTIONEER" || user.role === "ADMIN" ? (
         <section className="mt-8">
@@ -52,11 +81,11 @@ export function Dashboard() {
               Create auction
             </Link>
           </div>
-          {myAuctions.length === 0 ? (
+          {auctions.length === 0 ? (
             <p className="mt-3 text-sm text-zinc-600">No auctions yet.</p>
           ) : (
             <ul className="mt-3 divide-y divide-zinc-200 border-y border-zinc-200">
-              {myAuctions.map((auction) => (
+              {auctions.map((auction) => (
                 <li
                   key={auction.id}
                   className="flex flex-wrap items-center gap-3 py-3 text-sm"
@@ -79,28 +108,21 @@ export function Dashboard() {
       ) : (
         <section className="mt-8">
           <h2 className="text-lg font-medium">Your bids</h2>
-          {myBids.length === 0 ? (
+          {bids.length === 0 ? (
             <p className="mt-3 text-sm text-zinc-600">No bids yet.</p>
           ) : (
             <ul className="mt-3 divide-y divide-zinc-200 border-y border-zinc-200">
-              {myBids.map((bid) => {
-                const auction = db.auctions.find(
-                  (item) => item.id === bid.auctionId,
-                );
-                return (
-                  <li key={bid.id} className="py-3 text-sm">
-                    <Link
-                      href={
-                        auction ? `/auctions/${auction.id}/live` : "/auctions"
-                      }
-                      className="font-medium"
-                    >
-                      {auction?.title ?? "Auction"}
-                    </Link>
-                    <p className="text-zinc-600">{formatInr(bid.amount)}</p>
-                  </li>
-                );
-              })}
+              {bids.map((bid) => (
+                <li key={bid.id} className="py-3 text-sm">
+                  <Link
+                    href={`/auctions/${bid.auction.id}/live`}
+                    className="font-medium"
+                  >
+                    {bid.auction.title}
+                  </Link>
+                  <p className="text-zinc-600">{formatInr(bid.amount)}</p>
+                </li>
+              ))}
             </ul>
           )}
         </section>

@@ -3,46 +3,38 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
-import { loginMock, registerMock } from "@/lib/mock-db";
+import { ApiError, login, register } from "@/lib/api";
+import { useAuth } from "./auth-provider";
 
 const inputClass =
   "mt-1 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-900";
 
 export function AuthScreen({ mode }: { mode: "login" | "register" }) {
   const router = useRouter();
+  const { setSession } = useAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<"BIDDER" | "AUCTIONEER">("BIDDER");
   const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
 
-  function onSubmit(event: FormEvent<HTMLFormElement>) {
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (password.length < 8) {
-      setError("Use at least 8 characters for the password.");
-      return;
-    }
-
-    if (mode === "login") {
-      const message = loginMock(email, password);
-      if (message) {
-        setError(message);
-        return;
-      }
+    setError(null);
+    setPending(true);
+    try {
+      const result =
+        mode === "login"
+          ? await login(email, password)
+          : await register({ name, email, password, role });
+      setSession(result.token, result.user);
       router.push("/dashboard");
-      return;
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : "Request failed.");
+    } finally {
+      setPending(false);
     }
-
-    if (name.trim().length < 2) {
-      setError("Enter your name.");
-      return;
-    }
-    const message = registerMock({ name, email, password, role });
-    if (message) {
-      setError(message);
-      return;
-    }
-    router.push("/dashboard");
   }
 
   return (
@@ -51,17 +43,8 @@ export function AuthScreen({ mode }: { mode: "login" | "register" }) {
         {mode === "login" ? "Log in" : "Register"}
       </h1>
       <p className="mt-2 text-sm text-zinc-600">
-        Demo accounts stay in this browser. Nothing is sent to the API.
+        Accounts are stored by the API.
       </p>
-      {mode === "login" ? (
-        <p className="mt-3 rounded-md bg-zinc-100 px-3 py-2 text-sm text-zinc-700">
-          Bidder: ada@example.com
-          <br />
-          Auctioneer: ravi@example.com
-          <br />
-          Password: password123
-        </p>
-      ) : null}
       <form onSubmit={onSubmit} className="mt-6 space-y-4">
         {mode === "register" ? (
           <label className="block text-sm">
@@ -96,6 +79,7 @@ export function AuthScreen({ mode }: { mode: "login" | "register" }) {
             autoComplete={
               mode === "login" ? "current-password" : "new-password"
             }
+            minLength={8}
             required
           />
         </label>
@@ -117,7 +101,8 @@ export function AuthScreen({ mode }: { mode: "login" | "register" }) {
         {error ? <p className="text-sm text-red-700">{error}</p> : null}
         <button
           type="submit"
-          className="w-full rounded-md bg-zinc-900 px-3 py-2 text-sm text-white"
+          disabled={pending}
+          className="w-full rounded-md bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-60"
         >
           {mode === "login" ? "Log in" : "Create account"}
         </button>

@@ -2,7 +2,7 @@
 
 Small auction platform for demonstrating backend engineering: REST, PostgreSQL transactions, concurrent bidding, Socket.IO, Redis, Docker, and deployment.
 
-The UI is at **Phase 1** and still uses mock data. The API is at **Phase 3**: bids, winners, and anti-sniping are decided in PostgreSQL. The frontend is not connected to the API yet.
+The UI talks to the API. Bids, winners, and anti-sniping are decided in PostgreSQL. Other people's bids are not pushed live yet.
 
 ## Project overview
 
@@ -104,7 +104,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`. The pages are mock-only. Demo login: `ada@example.com` (bidder) or `ravi@example.com` (auctioneer), password `password123`. Placing a bid does not change the price.
+Open `http://localhost:3000`. Register an account, then use the API through the pages. The live room sends each bid to the server and shows the response. It does not yet receive other bidders' updates over a socket.
 
 Backend, without Docker (Postgres and Redis still come from Compose):
 
@@ -140,10 +140,10 @@ cd frontend && npm run lint && npm run build
 | Phase                   | Status                          |
 | ----------------------- | ------------------------------- |
 | 0 Foundation            | Done in this tree               |
-| 1 Light frontend        | Done. Mock data only            |
-| 2 Backend and database  | Done. Frontend still uses mocks |
+| 1 Light frontend        | Replaced by the API in Phase 4  |
+| 2 Backend and database  | Done                            |
 | 3 Concurrent bidding    | Done. Load test is Phase 8      |
-| 4 Connect frontend      | Not started                     |
+| 4 Connect frontend      | Done. Sockets are Phase 5       |
 | 5 WebSockets            | Not started                     |
 | 6 Redis                 | Not started                     |
 | 7 Docker and deployment | Compose file only; not deployed |
