@@ -34,7 +34,7 @@ The system separates **durable state**, **fast reads**, and **real-time delivery
 
 The Next.js browser communicates with the Express API through REST for normal operations. The live auction room also opens a Socket.IO connection. PostgreSQL remains the source of truth for users, auctions, and bids. Redis is used for read caching and, when multiple API processes are running, for Socket.IO Pub/Sub fan-out.
 
-![System Architecture](YOUR_IMAGE_URL_HERE)
+<img width="1093" height="567" alt="image" src="https://github.com/user-attachments/assets/9c85c9a0-12d1-4520-8688-b818070002b0" />
 
 ### Main components
 
@@ -70,7 +70,7 @@ A bid follows a deliberately strict path:
 9. If multiple API processes are running, the Redis adapter publishes the event so every process can update its local sockets.
 10. Connected browsers update their UI from the server-authoritative event.
 
-![Concurrent Bidding Flow](YOUR_IMAGE_URL_HERE)
+<img width="1165" height="647" alt="image" src="https://github.com/user-attachments/assets/f7cfac84-800e-4be2-a1cd-6cc8f28a148a" />
 
 This design means a client cannot make an outdated price authoritative by racing another client or by relying on a stale browser-side check.
 
@@ -101,7 +101,6 @@ Creating an auction with a future start time stores `SCHEDULED`. A start time al
 
 Ending an auction, or reaching `endsAt`, sets the winner to the highest bid. If two bids have the same amount, the earlier bid wins.
 
-![Auction Lifecycle](YOUR_IMAGE_URL_HERE)
 
 ### Why row-level locking?
 
@@ -130,7 +129,7 @@ Auction listing, auction details and bid history are read frequently, while writ
 
 The project therefore uses Redis as a **cache**, not as the source of truth.
 
-![Redis Cache-Aside Flow](YOUR_IMAGE_URL_HERE)
+<img width="1097" height="582" alt="image" src="https://github.com/user-attachments/assets/0bf03a6b-7385-4c0a-ab9a-b77aaa063c26" />
 
 ### Cache keys
 
@@ -177,7 +176,7 @@ Socket.IO connections belong to the API process that accepted them. If the appli
 
 The Socket.IO Redis adapter handles this fan-out through Redis Pub/Sub.
 
-![Real-Time Fan-Out](YOUR_IMAGE_URL_HERE)
+<img width="998" height="632" alt="image" src="https://github.com/user-attachments/assets/84377440-7450-4a79-91cb-d78d53b96d2b" />
 
 ### Events
 
@@ -331,7 +330,7 @@ CPU:         4 vCPU
 Memory:      16 GB
 ```
 
-![Measured Performance](YOUR_IMAGE_URL_HERE)
+<img width="1153" height="561" alt="image" src="https://github.com/user-attachments/assets/1f472493-5c9f-40ba-9f06-a012c7c92b85" />
 
 ### Concurrent bidding
 
